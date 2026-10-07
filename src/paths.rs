@@ -70,7 +70,7 @@ pub fn locate(config: &Config) -> Paths {
             }
             libraries
                 .iter()
-                .map(|lib| lib.join("steamapps/common/DayZ"))
+                .map(|lib| lib.join("steamapps").join("common").join("DayZ"))
                 .find(|dir| is_game_dir(dir))
                 .map(|path| Located {
                     path,
@@ -84,7 +84,7 @@ pub fn locate(config: &Config) -> Paths {
     if let Some(lib) = paths
         .game
         .as_ref()
-        .and_then(|g| steam::library_of(&g.path.canonicalize().unwrap_or(g.path.clone())))
+        .and_then(|g| steam::library_of(&steam::real_path(&g.path)))
     {
         search.push(lib);
     }
@@ -94,7 +94,12 @@ pub fn locate(config: &Config) -> Paths {
     paths.workshop = steam::dedup_dirs(
         search
             .iter()
-            .map(|lib| lib.join("steamapps/workshop/content").join(steam::DAYZ_APP))
+            .map(|lib| {
+                lib.join("steamapps")
+                    .join("workshop")
+                    .join("content")
+                    .join(steam::DAYZ_APP)
+            })
             .collect(),
     )
     .into_iter()
@@ -121,7 +126,7 @@ fn workshop_from_links(game: &Path) -> Vec<Located> {
     };
     let parents: Vec<PathBuf> = entries
         .flatten()
-        .filter_map(|e| e.path().canonicalize().ok())
+        .map(|e| steam::real_path(&e.path()))
         .filter_map(|target| target.parent().map(Path::to_owned))
         .filter(|parent| parent.file_name().is_some_and(|n| n == steam::DAYZ_APP))
         .collect();

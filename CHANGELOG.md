@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows 10 and 11 support. The map opens over DayZ in borderless or windowed mode without
+  taking focus from the game, finds DayZ through Steam's registry entry and library list, reads
+  the logs from `%LOCALAPPDATA%\DayZ`, and `dayz-map autostart on` starts it at sign-in.
+- `dayz-map status | head` and similar no longer print a broken-pipe error on Linux.
+- Config files saved with a byte-order mark (as Windows PowerShell does) load correctly.
+
 ## 0.1.0
 
 First release, for Linux Wayland desktops with layer-shell overlays (KDE Plasma 6, Sway,

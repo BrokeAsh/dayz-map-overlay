@@ -6,6 +6,20 @@ use std::path::{Path, PathBuf};
 pub const DAYZ_APP: &str = "221100";
 
 /// Where Steam itself may be installed.
+#[cfg(windows)]
+fn steam_roots() -> Vec<PathBuf> {
+    use crate::win::{HKEY_CURRENT_USER, registry_string};
+    let mut roots: Vec<PathBuf> =
+        registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+    roots.push(PathBuf::from(r"C:\Program Files (x86)\Steam"));
+    roots
+}
+
+/// Where Steam itself may be installed.
+#[cfg(not(windows))]
 fn steam_roots() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -17,7 +31,6 @@ fn steam_roots() -> Vec<PathBuf> {
         // Flatpak and Snap packages of Steam.
         home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
         home.join("snap/steam/common/.local/share/Steam"),
-        PathBuf::from(r"C:\Program Files (x86)\Steam"),
     ]
 }
 
@@ -26,7 +39,7 @@ fn steam_roots() -> Vec<PathBuf> {
 pub fn library_folders() -> Vec<PathBuf> {
     let mut libraries = Vec::new();
     for root in steam_roots() {
-        let vdf = root.join("steamapps/libraryfolders.vdf");
+        let vdf = root.join("steamapps").join("libraryfolders.vdf");
         if let Ok(text) = std::fs::read_to_string(&vdf) {
             libraries.extend(parse_paths(&text));
         }
@@ -41,6 +54,17 @@ pub fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     dirs.into_iter()
         .filter(|d| d.is_dir() && seen.insert(d.canonicalize().unwrap_or_else(|_| d.clone())))
         .collect()
+}
+
+/// The real location of `path` (following links), in a form that prints normally on Windows
+/// (without the `\\?\` prefix `canonicalize` adds there).
+pub fn real_path(path: &Path) -> PathBuf {
+    let real = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let text = real.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => real,
+    }
 }
 
 /// The library a game folder (`<library>/steamapps/common/<game>`) belongs to.

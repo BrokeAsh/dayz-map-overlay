@@ -616,7 +616,7 @@ impl OverlayApp {
                             ))
                             .weak(),
                         );
-                        if ui.button("✕").on_hover_text("Close").clicked() {
+                        if ui.button("×").on_hover_text("Close").clicked() {
                             self.close_requested = true;
                         }
                     });

@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the Linux binary and publish it as a GitHub release.
+# Push a tag like v0.1.0 (matching Cargo.toml's version) to build Linux and Windows binaries and
+# publish them as a GitHub release, with that version's CHANGELOG.md section as the notes.
 on:
   push:
     tags: ["v*"]
@@ -25,21 +26,58 @@ jobs:
         run: |
           test "v$(./target/release/dayz-map --version | cut -d' ' -f2)" = "$GITHUB_REF_NAME"
           ./target/release/dayz-map status
-      - name: Release notes
-        run: |
-          # This version's section of CHANGELOG.md.
-          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
-          test -s notes.md
       - name: Package
         run: |
           name="dayz-map-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir "$name"
           cp target/release/dayz-map README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
           tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dayz-map-*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Check the binary
+        shell: bash
+        run: |
+          test "v$(./target/release/dayz-map.exe --version | cut -d' ' -f2)" = "$GITHUB_REF_NAME"
+          ./target/release/dayz-map.exe status
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "dayz-map-$env:GITHUB_REF_NAME-windows-x86_64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/dayz-map.exe, README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dayz-map-*.zip
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          # This version's section of CHANGELOG.md.
+          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          test -s notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dayz-map-*.tar.gz dayz-map-*.tar.gz.sha256 \
+          sha256sum dayz-map-* > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" dayz-map-* SHA256SUMS \
             --title "$GITHUB_REF_NAME" --notes-file notes.md

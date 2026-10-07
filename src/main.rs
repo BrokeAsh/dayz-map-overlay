@@ -7,8 +7,11 @@ mod library;
 mod maps;
 mod paths;
 mod steam;
+#[cfg(target_os = "linux")]
 mod trigger;
 mod ui;
+#[cfg(windows)]
+mod win;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -80,9 +83,23 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
+    // stopping is what command-line tools do.
+    #[cfg(target_os = "linux")]
+    // SAFETY: called before any other threads exist.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Cmd::Run { show: false }) {
+    let command = cli.command.unwrap_or(Cmd::Run { show: false });
+    let console = !matches!(command, Cmd::Run { .. }) || keep_console();
+    let mut logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if !console && let Some(file) = log_file() {
+        logger.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    logger.init();
+    match command {
         Cmd::Run { show } => host::run(Config::load(), show),
         Cmd::Toggle => ipc::send(ipc::Command::Toggle),
         Cmd::Show => ipc::send(ipc::Command::Show),
@@ -109,7 +126,60 @@ fn main() -> Result<()> {
     }
 }
 
+/// For the overlay: on Windows, started outside a terminal (double-clicked, or at sign-in), the
+/// console window Windows opened is ours alone, so close it and keep running in the background.
+/// Returns whether a console remains for the log.
+#[cfg(windows)]
+fn keep_console() -> bool {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut processes = [0u32; 2];
+    // SAFETY: the buffer length is passed along with it.
+    let attached = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), 2) };
+    if attached > 1 {
+        return true;
+    }
+    // SAFETY: detaching from our own console.
+    unsafe { FreeConsole() };
+    false
+}
+
+#[cfg(not(windows))]
+fn keep_console() -> bool {
+    true
+}
+
+/// Where the log goes without a console: `dayz-map.log` in the data folder (Windows).
+fn log_file() -> Option<std::fs::File> {
+    let dir = config::data_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("dayz-map.log")).ok()
+}
+
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const RUN_VALUE: &str = "DayZ Map Overlay";
+
+/// Adds or removes the sign-in entry (the `Run` registry key) that starts this program.
+#[cfg(windows)]
+fn autostart(on: bool) -> Result<()> {
+    use win::{HKEY_CURRENT_USER, delete_registry_value, set_registry_string};
+    if on {
+        let exe = std::env::current_exe()?;
+        let command = format!("\"{}\" run", exe.display());
+        set_registry_string(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, &command)
+            .context("writing the sign-in entry")?;
+        println!("The overlay will start when you sign in.");
+    } else if delete_registry_value(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE)? {
+        println!("Removed the sign-in entry.");
+    } else {
+        println!("Autostart was off");
+    }
+    Ok(())
+}
+
 /// Adds or removes a login entry (`~/.config/autostart`) that runs this binary.
+#[cfg(not(windows))]
 fn autostart(on: bool) -> Result<()> {
     let dirs = directories::BaseDirs::new().context("no home directory")?;
     let entry = dirs.config_dir().join("autostart/dayz-map-overlay.desktop");

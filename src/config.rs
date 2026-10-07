@@ -73,7 +73,8 @@ impl Config {
     pub fn load() -> Self {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+            // Windows editors may start the file with a byte-order mark.
+            Ok(text) => toml::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_else(|e| {
                 log::warn!("ignoring invalid {}: {e}", path.display());
                 Self::default()
             }),
