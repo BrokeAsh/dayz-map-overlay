@@ -21,7 +21,7 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 2;
+pub const POI_VERSION: u32 = 3;
 
 const ECONOMY_FILES: [&str; 4] = [
     "mapgrouppos.xml",
@@ -140,6 +140,8 @@ impl WorldSource {
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     pub worlds: Vec<WorldSource>,
+    /// Every mod (Workshop item id or `@folder`) the scan looked at.
+    pub mods: std::collections::HashSet<String>,
 }
 
 impl Catalog {
@@ -318,7 +320,8 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         });
     }
     worlds.sort_by_key(|a| a.name.to_lowercase());
-    Catalog { worlds }
+    let mods = archives.iter().filter_map(|a| a.mod_id.clone()).collect();
+    Catalog { worlds, mods }
 }
 
 /// How well an archive belongs to a world anchored at `anchor`; `None` if it doesn't.

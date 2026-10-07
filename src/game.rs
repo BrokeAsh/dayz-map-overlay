@@ -28,6 +28,8 @@ pub struct Session {
 const POLL: Duration = Duration::from_secs(1);
 /// How often to look for the logs folder again while it's missing.
 const RELOCATE: Duration = Duration::from_secs(10);
+/// How much of the script log to read at a time (and of an existing one, from its end).
+const LOG_TAIL: u64 = 4 << 20;
 /// How long to wait before asking a server that didn't answer for its name again.
 const QUERY_RETRY: Duration = Duration::from_secs(30);
 
@@ -99,9 +101,10 @@ impl Watcher {
 
         if let Some(rpt) = newest(&dirs, "DayZ_x64_", ".RPT")
             && self.rpt.as_ref() != Some(&rpt)
+            // The game may not have written the command line yet; try again next time.
+            && let Some((server, query, mods)) =
+                launch_options(&rpt, paths.game.as_ref().map(|g| g.path.as_path()))
         {
-            let game = paths.game.as_ref().map(|g| g.path.as_path());
-            let (server, query, mods) = launch_options(&rpt, game);
             self.session.server = server;
             self.session.mods = mods;
             self.session.server_name = None;
@@ -137,15 +140,29 @@ impl Watcher {
             self.offset = 0;
             self.partial.clear();
         }
+        // A long modded session's log can be hundreds of MB; the latest mission is near the end.
+        let mut mid_line = false;
+        if self.offset == 0 && len > LOG_TAIL {
+            self.offset = len - LOG_TAIL;
+            mid_line = true;
+        }
         if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
             return Vec::new();
         }
         let mut bytes = Vec::new();
-        if file.read_to_end(&mut bytes).is_err() {
+        if file.take(LOG_TAIL).read_to_end(&mut bytes).is_err() {
             return Vec::new();
         }
         self.offset += bytes.len() as u64;
         self.partial.push_str(&String::from_utf8_lossy(&bytes));
+        if mid_line {
+            // Started partway through a line.
+            let rest = self
+                .partial
+                .find('\n')
+                .map_or(self.partial.len(), |i| i + 1);
+            self.partial.drain(..rest);
+        }
         let complete = self.partial.rfind('\n').map_or(0, |i| i + 1);
         let lines = self.partial[..complete]
             .lines()
@@ -203,18 +220,25 @@ fn mission_world(line: &str) -> Option<Option<String>> {
     Some((mission != "intro" && !world.is_empty()).then(|| world.to_string()))
 }
 
-/// Server address, query port, and mod ids from the RPT's command-line line.
-fn launch_options(rpt: &Path, game: Option<&Path>) -> (Option<String>, Option<u16>, Vec<String>) {
+/// Server address, query port, and mod ids from the RPT's command-line line; `None` until the
+/// game has written enough of the file to tell.
+fn launch_options(
+    rpt: &Path,
+    game: Option<&Path>,
+) -> Option<(Option<String>, Option<u16>, Vec<String>)> {
     let mut head = String::new();
     if let Ok(file) = std::fs::File::open(rpt) {
         let _ = file.take(64 * 1024).read_to_string(&mut head);
     }
-    let Some(line) = head
+    // Only whole lines: the last one may still be being written.
+    let complete = &head[..head.rfind('\n').map_or(0, |i| i + 1)];
+    let Some(line) = complete
         .lines()
         .take(10)
         .find(|l| l.contains("-connect=") || l.contains("-mod="))
     else {
-        return (None, None, Vec::new());
+        // Started without a server or mods, or not written yet.
+        return (complete.lines().count() >= 10).then_some((None, None, Vec::new()));
     };
     let option = |name: &str| -> Option<&str> {
         let start = line.find(name)? + name.len();
@@ -239,7 +263,7 @@ fn launch_options(rpt: &Path, game: Option<&Path>) -> (Option<String>, Option<u1
                 .collect()
         })
         .unwrap_or_default();
-    (server, query, mods)
+    Some((server, query, mods))
 }
 
 /// The id the catalog knows a `-mod=` entry by. Launchers pass links such as

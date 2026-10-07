@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod layout;
+mod lzo;
 mod lzss;
 pub mod paa;
 pub mod pbo;
@@ -26,6 +27,8 @@ pub use catalog::{Catalog, TileSource, WorldSource};
 use layout::TileLayout;
 
 pub const SATELLITE: &str = "satellite";
+/// The layer `import-image` makes.
+const PICTURE: &str = "picture";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Progress {
@@ -101,7 +104,14 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
         source: source.fingerprint(),
         mod_id: source.mod_id.clone(),
         pois_source: source.pois_fingerprint(),
-        layers: vec![layer],
+        // A picture the user imported stays in front: they chose it over the satellite.
+        layers: maps::load(&dir)
+            .map(|old| old.meta.layers)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| l.id == PICTURE)
+            .chain([layer])
+            .collect(),
     };
     maps::save_meta(&dir, &meta)?;
     Ok(MapPack { meta, dir })
@@ -109,9 +119,14 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
 
 /// Rebuilds only the points of interest of an imported map.
 pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
+    let _lock = ImportLock::take(&pack.dir)?;
+    // Another import may have rewritten it since it was loaded.
+    let mut meta = maps::load(&pack.dir)?.meta;
     write_pois(source, &pack.dir)?;
-    pack.meta.pois_source = source.pois_fingerprint();
-    maps::save_meta(&pack.dir, &pack.meta)
+    meta.pois_source = source.pois_fingerprint();
+    maps::save_meta(&pack.dir, &meta)?;
+    pack.meta = meta;
+    Ok(())
 }
 
 fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
@@ -126,10 +141,27 @@ fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
         markers.retain(|m| m.kind != poi::Kind::Water);
     }
     markers.extend(water);
+    // JSON can't hold NaN or infinity (a bad number in a mod's files), and one would make the
+    // whole file unreadable.
+    markers.retain(|m| m.x.is_finite() && m.z.is_finite());
+    // Mods sometimes park objects far off the terrain (one Deer Isle build has water at
+    // x = -180000); a marker there would only stretch the map's bounds.
+    if let Some(size) = source.world_size {
+        let on_map = |c: f32| (0.0..=size as f32).contains(&c);
+        markers.retain(|m| on_map(m.x) && on_map(m.z));
+    }
     let pois = poi::Pois {
-        places: source.places.clone(),
+        places: source
+            .places
+            .iter()
+            .filter(|p| p.x.is_finite() && p.z.is_finite())
+            .cloned()
+            .collect(),
         markers,
-        zones,
+        zones: zones
+            .into_iter()
+            .filter(|z| z.x.is_finite() && z.z.is_finite() && z.radius.is_finite())
+            .collect(),
     };
     log::info!(
         "{}: {} places, {} markers, {} zones",
@@ -138,7 +170,8 @@ fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
         pois.markers.len(),
         pois.zones.len()
     );
-    std::fs::write(dir.join("pois.json"), serde_json::to_vec(&pois)?)?;
+    // Written whole, then swapped in, so the overlay never reads half a file.
+    maps::write_atomic(&dir.join("pois.json"), &serde_json::to_vec(&pois)?)?;
     Ok(())
 }
 
@@ -361,16 +394,18 @@ impl Builder<'_> {
 
 pub fn save_tile(image: &RgbaImage, path: &Path) -> Result<()> {
     let opaque = image.pixels().all(|p| p[3] == 255);
-    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
     if path.extension().is_some_and(|e| e == "jpg") {
         let rgb = image::DynamicImage::ImageRgba8(image.clone()).into_rgb8();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(file, 88).encode_image(&rgb)?;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88).encode_image(&rgb)?;
     } else if opaque {
         let rgb = image::DynamicImage::ImageRgba8(image.clone()).into_rgb8();
-        rgb.write_with_encoder(image::codecs::png::PngEncoder::new(file))?;
+        rgb.write_with_encoder(image::codecs::png::PngEncoder::new(&mut file))?;
     } else {
-        image.write_with_encoder(image::codecs::png::PngEncoder::new(file))?;
+        image.write_with_encoder(image::codecs::png::PngEncoder::new(&mut file))?;
     }
+    // Dropping the writer would hide a failed final write (a full disk, say).
+    std::io::Write::flush(&mut file)?;
     Ok(())
 }
 
@@ -409,7 +444,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         .into_rgba8();
     let max_level = grid.next_power_of_two().trailing_zeros();
     let layer = LayerMeta {
-        id: "picture".into(),
+        id: PICTURE.into(),
         name: "Picture".into(),
         tile_px: TILE_PX,
         grid,
@@ -455,8 +490,9 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         });
     meta.name = name.into();
     meta.world_size = world_size;
+    // The overlay draws the first layer: the picture replaces the satellite view.
     meta.layers.retain(|l| l.id != layer.id);
-    meta.layers.push(layer);
+    meta.layers.insert(0, layer);
     maps::save_meta(&dir, &meta)?;
     Ok(MapPack { meta, dir })
 }

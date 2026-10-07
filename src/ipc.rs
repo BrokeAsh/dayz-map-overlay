@@ -134,8 +134,9 @@ pub fn send(command: Command) -> Result<()> {
     }
 }
 
-/// Keeps the control channel open; dropping it removes the socket or port file.
-pub struct Listening(());
+/// Keeps the control channel open; dropping it removes the socket or port file. It also holds
+/// the instance lock, which the system releases however the process ends.
+pub struct Listening(#[allow(dead_code)] std::fs::File);
 
 impl Drop for Listening {
     fn drop(&mut self) {
@@ -145,6 +146,22 @@ impl Drop for Listening {
 
 /// Starts listening for commands, failing if another overlay is already running.
 pub fn listen(on_command: impl Fn(Command) + Send + 'static) -> Result<Listening> {
+    // Two copies starting at once (autostart and a double-click) would both find nothing
+    // listening below; a lock decides which one runs.
+    let dir = crate::config::data_dir();
+    std::fs::create_dir_all(&dir)?;
+    // (Not truncated: Windows refuses to truncate a file another process has locked.)
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("instance.lock"))
+        .context("creating the instance lock")?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!("the overlay is already running"),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e).context("locking the instance lock"),
+    }
     // A port file may be left from a crash and its port reused by something else, so on Windows
     // only a reply proves an overlay is there. A Unix socket only connects while its listener
     // runs (versions before 0.2 close it without replying).
@@ -152,7 +169,7 @@ pub fn listen(on_command: impl Fn(Command) + Send + 'static) -> Result<Listening
         anyhow::bail!("the overlay is already running");
     }
     let (listener, prefix) = endpoint::bind().context("opening the control channel")?;
-    let listening = Listening(());
+    let listening = Listening(lock);
     std::thread::Builder::new()
         .name("ipc".into())
         .spawn(move || {

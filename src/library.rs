@@ -87,19 +87,33 @@ impl Worker {
     fn run(self, rx: Receiver<Request>) {
         let mut upgraded = false;
         for request in rx {
-            match request {
-                Request::Scan => {
-                    self.scan();
-                    if !upgraded {
-                        upgraded = true;
-                        self.upgrade_old_imports();
-                    }
+            // A bug tripped by some mod's files mustn't stop the library for the whole session.
+            let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.handle(request, &mut upgraded)
+            }));
+            if handled.is_err() {
+                self.update(|s| {
+                    s.job = None;
+                    s.scanning = false;
+                    s.message = Some("Reading the map files failed; see the log.".into());
+                });
+            }
+        }
+    }
+
+    fn handle(&self, request: Request, upgraded: &mut bool) {
+        match request {
+            Request::Scan => {
+                self.scan();
+                if !*upgraded {
+                    *upgraded = true;
+                    self.upgrade_old_imports();
                 }
-                Request::Ensure { world, mods } => self.ensure(&world, &mods),
-                Request::Import { id } => {
-                    if let Some(source) = self.catalog().best(&id, &[]) {
-                        self.import(&self.fresh(source, &[]), false);
-                    }
+            }
+            Request::Ensure { world, mods } => self.ensure(&world, &mods),
+            Request::Import { id } => {
+                if let Some(source) = self.catalog().best(&id, &[]) {
+                    self.import(&self.fresh(source, &[]), false);
                 }
             }
         }
@@ -143,8 +157,8 @@ impl Worker {
 
     fn ensure(&self, world: &str, mods: &[String]) {
         let mut catalog = self.catalog();
-        if catalog.best(world, mods).is_none() {
-            // Maybe a newly downloaded mod.
+        // A newly downloaded mod: maybe this map, or another copy of it that the server uses.
+        if catalog.best(world, mods).is_none() || mods.iter().any(|m| !catalog.mods.contains(m)) {
             catalog = self.scan();
         }
         let Some(source) = catalog.best(world, mods).map(|s| self.fresh(s, mods)) else {
@@ -162,7 +176,13 @@ impl Worker {
             return;
         };
         match maps::load(&maps::maps_dir().join(&source.id)) {
-            Ok(mut pack) if pack.meta.source == source.fingerprint() => {
+            // (A mod update can resize the terrain without touching its tiles.)
+            Ok(mut pack)
+                if pack.meta.source == source.fingerprint()
+                    && source
+                        .world_size
+                        .is_none_or(|size| (size.round() - pack.meta.world_size).abs() < 1.0) =>
+            {
                 self.refresh_pois(&source, &mut pack);
                 self.update(|s| s.ready = Some(source.id.clone()));
             }

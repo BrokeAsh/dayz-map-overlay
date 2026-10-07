@@ -1,6 +1,6 @@
 //! Shows the overlay as a full-screen layer-shell surface on the `overlay` layer, which the
-//! compositor draws above everything, fullscreen games included. While visible it takes the
-//! keyboard exclusively; hiding destroys the surface so focus returns to the game.
+//! compositor draws above everything, fullscreen games included. It never takes keyboard focus,
+//! so the game stays active underneath; the hotkey comes from XWayland (`crate::trigger`).
 
 use anyhow::{Context, Result};
 use egui_wgpu::wgpu;
@@ -49,6 +49,8 @@ use crate::ui::OverlayApp;
 
 /// Ignore the hotkey this soon after closing, in case the game sees the closing key press.
 const REOPEN_GRACE: Duration = Duration::from_millis(400);
+/// How soon to try again when a frame couldn't be drawn.
+const SKIPPED_RETRY: Duration = Duration::from_millis(100);
 
 pub fn run(config: Config, show: bool) -> Result<()> {
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
@@ -146,9 +148,13 @@ pub fn run(config: Config, show: bool) -> Result<()> {
     log::info!("ready; press {hotkey} in DayZ to open the map");
 
     while !host.exit {
-        let timeout = host
+        let mut timeout = host
             .next_repaint
             .map(|t| t.saturating_duration_since(Instant::now()));
+        // A skipped frame has no frame callback coming to wake us; try again shortly.
+        if host.needs_redraw && !host.overlay.as_ref().is_some_and(|o| o.frame_pending) {
+            timeout = Some(timeout.map_or(SKIPPED_RETRY, |t| t.min(SKIPPED_RETRY)));
+        }
         event_loop.dispatch(timeout, &mut host)?;
         if host.next_repaint.is_some_and(|t| t <= Instant::now()) {
             host.next_repaint = None;

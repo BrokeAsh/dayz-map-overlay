@@ -159,10 +159,19 @@ pub fn load(dir: &Path) -> Result<MapPack> {
 
 pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join("map.toml.tmp");
-    std::fs::write(&tmp, toml::to_string_pretty(meta)?)?;
-    std::fs::rename(tmp, dir.join("map.toml"))?;
-    Ok(())
+    write_atomic(
+        &dir.join("map.toml"),
+        toml::to_string_pretty(meta)?.as_bytes(),
+    )
+}
+
+/// Writes a file through a temporary one (named for this process, so two programs saving at
+/// once don't share it), so readers see the old or the new file, never part of one.
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Friendly names for the official maps; modded maps fall back to their world name.

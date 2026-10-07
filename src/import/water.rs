@@ -23,7 +23,9 @@ type WaterPoint<'a> = (f32, f32, &'a str);
 
 /// Lower-case class names that extend `Well` in any of these archives' scripts.
 pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
-    let mut parents: HashMap<String, String> = HashMap::new();
+    // Every parent each class is declared with: scripts redeclare classes (`modded class`,
+    // other mods), and any one path to `Well` counts.
+    let mut parents: HashMap<String, HashSet<String>> = HashMap::new();
     for pbo in scripts {
         for entry in &pbo.entries {
             if !entry.name.to_ascii_lowercase().ends_with(".c") {
@@ -36,7 +38,7 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
             // (`LabTap extends Sink`, with `Sink extends Well` in another file).
             let text = String::from_utf8_lossy(&data);
             for (class, parent) in class_declarations(&text) {
-                parents.insert(class, parent);
+                parents.entry(class).or_default().insert(parent);
             }
         }
     }
@@ -45,8 +47,8 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
     // Follow `extends` chains until nothing new joins.
     loop {
         let before = wells.len();
-        for (class, parent) in &parents {
-            if wells.contains(parent) {
+        for (class, declared) in &parents {
+            if declared.iter().any(|parent| wells.contains(parent)) {
                 wells.insert(class.clone());
             }
         }

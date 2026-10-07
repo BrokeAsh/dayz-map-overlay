@@ -86,8 +86,30 @@ impl Config {
                     ..Self::default()
                 }
             }),
-            Err(_) => Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            // Not UTF-8 (Windows PowerShell can write UTF-16), or unreadable.
+            Err(e) => {
+                log::warn!("ignoring {}: {e}", path.display());
+                Self {
+                    unreadable: true,
+                    ..Self::default()
+                }
+            }
         }
+    }
+
+    /// Saves what the overlay itself changes (view settings, and the game folder when picked),
+    /// keeping anything else edited in the file while it ran.
+    pub fn save_from_overlay(&self, game_dir_picked: bool) -> Result<()> {
+        let mut on_disk = Self::load();
+        if on_disk.unreadable {
+            return self.save();
+        }
+        on_disk.view = self.view.clone();
+        if game_dir_picked {
+            on_disk.game_dir = self.game_dir.clone();
+        }
+        on_disk.save()
     }
 
     pub fn save(&self) -> Result<()> {
@@ -96,8 +118,10 @@ impl Config {
         // (Only while the file on disk is still the unreadable one: after the first save, it's
         // ours.)
         let still_unreadable = || {
-            std::fs::read_to_string(&path).is_ok_and(|text| {
-                toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).is_err()
+            std::fs::read(&path).is_ok_and(|bytes| {
+                std::str::from_utf8(&bytes).map_or(true, |text| {
+                    toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).is_err()
+                })
             })
         };
         if self.unreadable && still_unreadable() {

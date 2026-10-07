@@ -48,8 +48,9 @@ pub fn stamp(path: &Path) -> String {
 }
 
 fn read_cstr(r: &mut impl BufRead) -> Result<String> {
+    // Names and header values are short; a file without NULs mustn't be read whole.
     let mut buf = Vec::new();
-    r.read_until(0, &mut buf)?;
+    r.take(1024).read_until(0, &mut buf)?;
     if buf.pop() != Some(0) {
         bail!("unexpected end of PBO header");
     }

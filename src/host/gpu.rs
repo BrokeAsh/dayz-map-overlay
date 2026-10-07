@@ -89,6 +89,9 @@ impl Gpu {
         } else {
             wgpu::PresentMode::Fifo
         };
+        // A surface that can't be set up (no desktop to show on, say) is an error to report,
+        // not wgpu's default of panicking.
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
@@ -103,6 +106,9 @@ impl Gpu {
                 view_formats: vec![],
             },
         );
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            anyhow::bail!("setting up the overlay's drawing surface: {e}");
+        }
         Ok(())
     }
 

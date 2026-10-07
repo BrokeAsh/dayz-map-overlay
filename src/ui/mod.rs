@@ -6,8 +6,8 @@
 mod tiles;
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Margin, Pos2, Rect, Sense, Shape,
-    Stroke, StrokeKind, Vec2,
+    Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, Vec2,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -169,7 +169,7 @@ impl OverlayApp {
     pub fn on_hide(&mut self) {
         // Free GPU memory for the game; the overview levels reload instantly next time.
         self.tiles.trim(2);
-        if let Err(e) = self.config.save() {
+        if let Err(e) = self.config.save_from_overlay(false) {
             log::warn!("saving settings: {e:#}");
         }
     }
@@ -244,7 +244,7 @@ impl OverlayApp {
                 log::info!("using the DayZ folder {}", game.display());
                 self.notice = None;
                 self.config.game_dir = Some(game);
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_from_overlay(true) {
                     log::warn!("saving settings: {e:#}");
                 }
                 self.library.relocate(&self.config);
@@ -310,24 +310,6 @@ impl OverlayApp {
             if factor != 1.0 {
                 view.zoom_around(screen, p, factor, min_zoom);
             }
-        }
-        let (zoom_in, zoom_out, reset) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals),
-                i.key_pressed(Key::Minus),
-                i.key_pressed(Key::Num0) || i.key_pressed(Key::Home),
-            )
-        });
-        if zoom_in || zoom_out {
-            view.zoom_around(
-                screen,
-                screen.center(),
-                if zoom_in { 1.5 } else { 1.0 / 1.5 },
-                min_zoom,
-            );
-        }
-        if reset {
-            *view = fit;
         }
         view.center = view.center.map(|c| c.clamp(0.0, world));
         let view = *view;

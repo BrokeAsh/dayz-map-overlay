@@ -84,6 +84,7 @@ pub fn parse(data: &[u8]) -> Result<Class> {
         data,
         depth: 0,
         budget: data.len(),
+        bodies: Default::default(),
     };
     reader.class_body(16)
 }
@@ -94,6 +95,9 @@ struct Reader<'a> {
     /// Entries and array items left to read. Each takes at least a byte, so a real config never
     /// runs out; a crafted one whose classes share bodies would otherwise parse exponentially.
     budget: usize,
+    /// Class bodies already read. Real configs give each class its own; a crafted one could
+    /// point many classes at one body and multiply the work and memory.
+    bodies: std::collections::HashSet<usize>,
 }
 
 impl Reader<'_> {
@@ -180,6 +184,9 @@ impl Reader<'_> {
     }
 
     fn class_body(&mut self, offset: usize) -> Result<Class> {
+        if !self.bodies.insert(offset) {
+            bail!("config classes share a body");
+        }
         self.enter()?;
         let mut i = offset;
         let _parent = self.string(&mut i)?;
