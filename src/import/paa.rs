@@ -33,6 +33,11 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage> {
     if width == 0 || height == 0 {
         bail!("PAA has no mipmaps");
     }
+    // Terrain tiles are at most a few thousand pixels; this keeps a bad header from asking for
+    // gigabytes.
+    if width > 8192 || height > 8192 {
+        bail!("PAA is too large ({width}x{height})");
+    }
     let expected = format.compressed_size(width, height);
     let blocks = if raw_width & 0x8000 != 0 {
         lzokay_native::decompress_all(payload, Some(expected))

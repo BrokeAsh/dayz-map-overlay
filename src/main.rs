@@ -83,22 +83,41 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
-    // stopping is what command-line tools do.
-    #[cfg(target_os = "linux")]
-    // SAFETY: called before any other threads exist.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Cmd::Run { show: false });
-    let console = !matches!(command, Cmd::Run { .. }) || keep_console();
+    let overlay = matches!(command, Cmd::Run { .. });
+    // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
+    // stopping is what command-line tools do. The overlay keeps ignoring it, so a closed log
+    // pipe can't kill it.
+    #[cfg(target_os = "linux")]
+    if !overlay {
+        // SAFETY: called before any other threads exist.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+    let console = !overlay || keep_console();
     let mut logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if !console && let Some(file) = log_file() {
-        logger.target(env_logger::Target::Pipe(Box::new(file)));
+    let logging_to_file = !console && open_log_file();
+    if logging_to_file {
+        logger.target(env_logger::Target::Pipe(Box::new(LogFile)));
+        // Without a console, panics and errors would otherwise vanish.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("{info}");
+            default_hook(info);
+        }));
     }
     logger.init();
+    let result = run(command);
+    if logging_to_file && let Err(e) = &result {
+        log::error!("{e:#}");
+    }
+    result
+}
+
+fn run(command: Cmd) -> Result<()> {
     match command {
         Cmd::Run { show } => host::run(Config::load(), show),
         Cmd::Toggle => ipc::send(ipc::Command::Toggle),
@@ -149,10 +168,47 @@ fn keep_console() -> bool {
 }
 
 /// Where the log goes without a console: `dayz-map.log` in the data folder (Windows).
-fn log_file() -> Option<std::fs::File> {
+static LOG_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// Opens the log for appending, so a second copy that finds the overlay already running
+/// doesn't wipe the running one's log.
+fn open_log_file() -> bool {
     let dir = config::data_dir();
-    std::fs::create_dir_all(&dir).ok()?;
-    std::fs::File::create(dir.join("dayz-map.log")).ok()
+    let file = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log_path())
+    });
+    file.is_ok_and(|file| LOG_FILE.set(file).is_ok())
+}
+
+fn log_path() -> PathBuf {
+    config::data_dir().join("dayz-map.log")
+}
+
+/// Starts the log over; called once this is known to be the only overlay running. (Through a
+/// second handle: Windows can't truncate through an append-only one. Appends then continue
+/// from the new end.)
+pub fn fresh_log() {
+    if LOG_FILE.get().is_some() {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(log_path())
+            .and_then(|file| file.set_len(0));
+    }
+}
+
+struct LogFile;
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        LOG_FILE.get().expect("log file is open").write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        LOG_FILE.get().expect("log file is open").flush()
+    }
 }
 
 #[cfg(windows)]
@@ -165,7 +221,16 @@ const RUN_VALUE: &str = "DayZ Map Overlay";
 fn autostart(on: bool) -> Result<()> {
     use win::{HKEY_CURRENT_USER, delete_registry_value, set_registry_string};
     if on {
-        let exe = std::env::current_exe()?;
+        let exe = steam::real_path(&std::env::current_exe()?);
+        // Running straight from the zip, Explorer extracts to a temporary folder that's
+        // cleaned up later, which would leave the sign-in entry pointing at nothing.
+        if exe.starts_with(steam::real_path(&std::env::temp_dir())) {
+            anyhow::bail!(
+                "{} is in a temporary folder; extract the zip to a folder that will stay, \
+                 then run `dayz-map autostart on` from there",
+                exe.display()
+            );
+        }
         let command = format!("\"{}\" run", exe.display());
         set_registry_string(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, &command)
             .context("writing the sign-in entry")?;

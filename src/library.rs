@@ -98,7 +98,7 @@ impl Worker {
                 Request::Ensure { world, mods } => self.ensure(&world, &mods),
                 Request::Import { id } => {
                     if let Some(source) = self.catalog().best(&id, &[]) {
-                        self.import(&source, false);
+                        self.import(&self.fresh(source, &[]), false);
                     }
                 }
             }
@@ -126,6 +126,16 @@ impl Worker {
         catalog
     }
 
+    /// `source`, rescanned if a mod update changed its files since the scan (the archive
+    /// offsets the scan recorded would be wrong).
+    fn fresh(&self, source: WorldSource, mods: &[String]) -> WorldSource {
+        if !source.changed_since_scan() {
+            return source;
+        }
+        log::info!("{} changed since the last scan; rescanning", source.name);
+        self.scan().best(&source.id, mods).unwrap_or(source)
+    }
+
     fn catalog(&self) -> Arc<Catalog> {
         let existing = self.state.lock().unwrap().catalog.clone();
         existing.unwrap_or_else(|| self.scan())
@@ -137,7 +147,7 @@ impl Worker {
             // Maybe a newly downloaded mod.
             catalog = self.scan();
         }
-        let Some(source) = catalog.best(world, mods) else {
+        let Some(source) = catalog.best(world, mods).map(|s| self.fresh(s, mods)) else {
             log::warn!("no map files found for {world}");
             let installed = maps::load(&maps::maps_dir().join(world)).is_ok();
             self.update(|s| {
@@ -215,6 +225,7 @@ impl Worker {
             let Some(source) = catalog.best(&pack.meta.id, &mods) else {
                 continue;
             };
+            let source = self.fresh(source, &mods);
             if pack.meta.format < catalog::IMPORT_VERSION {
                 log::info!("updating {} to the current import format", pack.meta.name);
                 self.import(&source, false);

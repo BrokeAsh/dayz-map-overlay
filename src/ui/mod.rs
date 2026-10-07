@@ -60,7 +60,8 @@ impl View {
     /// Zooms by `factor`, keeping the world point under `anchor` in place.
     fn zoom_around(&mut self, screen: Rect, anchor: Pos2, factor: f64, min_zoom: f64) {
         let before = self.to_world(screen, anchor);
-        self.zoom = (self.zoom * factor).clamp(min_zoom, MAX_ZOOM);
+        // (A tiny map can't zoom out past MAX_ZOOM; `clamp` panics if min > max.)
+        self.zoom = (self.zoom * factor).clamp(min_zoom.min(MAX_ZOOM), MAX_ZOOM);
         let after = self.to_world(screen, anchor);
         self.center[0] += before[0] - after[0];
         self.center[1] += before[1] - after[1];
@@ -741,6 +742,20 @@ impl OverlayApp {
                                         import = Some(world.id.clone());
                                     }
                                 }
+                            }
+                        });
+                    });
+                }
+                // Maps with no files in the game or Workshop folders, such as imported pictures.
+                let unique = catalog.unique();
+                for map in self.maps.iter().filter(|m| !unique.iter().any(|w| w.id == m.meta.id)) {
+                    ui.horizontal(|ui| {
+                        ui.label(&map.meta.name);
+                        let label = if map.meta.format == 0 { "picture" } else { "installed" };
+                        ui.label(egui::RichText::new(label).weak().small());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("View").clicked() {
+                                view = Some(map.meta.id.clone());
                             }
                         });
                     });

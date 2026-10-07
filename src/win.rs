@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
 };
 
 pub use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
@@ -116,6 +116,18 @@ pub struct Foreground {
     pub description: String,
     /// Whether it belongs to this program.
     pub ours: bool,
+}
+
+/// The front window's handle (null if none), without the lookups `foreground` does.
+pub fn foreground_window() -> HWND {
+    // SAFETY: a plain query.
+    unsafe { GetForegroundWindow() }
+}
+
+/// Whether `hwnd` still names a window (the game may have closed since it was seen).
+pub fn is_window(hwnd: HWND) -> bool {
+    // SAFETY: IsWindow accepts any value.
+    unsafe { IsWindow(hwnd) != 0 }
 }
 
 pub fn foreground() -> Option<Foreground> {

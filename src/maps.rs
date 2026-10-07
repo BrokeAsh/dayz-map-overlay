@@ -84,6 +84,47 @@ pub fn maps_dir() -> PathBuf {
     crate::config::data_dir().join("maps")
 }
 
+/// Whether a world id is safe to use as a folder name. Ids come from mods' configs and archive
+/// prefixes, so something like `../x` must not reach the file system.
+pub fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Checks a terrain size (metres) before it's used for drawing.
+pub fn check_world_size(size: f64) -> Result<()> {
+    if !(100.0..=200_000.0).contains(&size) {
+        anyhow::bail!("implausible world size {size} m (expected 100 to 200000)");
+    }
+    Ok(())
+}
+
+impl MapMeta {
+    /// Rejects values that would break drawing (a damaged or hand-edited `map.toml`).
+    fn check(&self) -> Result<()> {
+        if !valid_id(&self.id) {
+            anyhow::bail!("bad map id {:?}", self.id);
+        }
+        check_world_size(self.world_size)?;
+        for layer in &self.layers {
+            let ok = (1..=8192).contains(&layer.tile_px)
+                && (1..=4096).contains(&layer.grid)
+                && layer.max_level <= 16
+                && layer.grid <= 1 << layer.max_level
+                && layer.tile_m.is_finite()
+                && layer.tile_m > 0.0
+                && layer.origin.iter().all(|c| c.is_finite())
+                && layer.ext.bytes().all(|b| b.is_ascii_alphanumeric());
+            if !ok {
+                anyhow::bail!("bad layer {:?}", layer.id);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn load_all() -> Vec<MapPack> {
     let mut packs: Vec<MapPack> = std::fs::read_dir(maps_dir())
         .into_iter()
@@ -106,7 +147,10 @@ pub fn load(dir: &Path) -> Result<MapPack> {
     let path = dir.join("map.toml");
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let meta = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let meta: MapMeta =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    meta.check()
+        .with_context(|| format!("checking {}", path.display()))?;
     Ok(MapPack {
         meta,
         dir: dir.to_owned(),

@@ -42,7 +42,7 @@ use wayland_client::{
 };
 
 use super::HostEvent;
-use super::gpu::{Fade, Frame, Gpu, repaint_after};
+use super::gpu::{Fade, Frame, Gpu, repaint_after, repaint_in};
 use crate::config::Config;
 use crate::ipc::{self, Command};
 use crate::ui::OverlayApp;
@@ -70,7 +70,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let ipc_tx = tx.clone();
-    ipc::listen(move |command| {
+    let _control = ipc::listen(move |command| {
         let _ = ipc_tx.send(HostEvent::Command(command));
     })?;
 
@@ -159,7 +159,6 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         }
     }
     host.hide();
-    ipc::cleanup();
     Ok(())
 }
 
@@ -240,14 +239,13 @@ impl Host {
                 self.app.on_session(session);
                 self.needs_redraw = true;
             }
-            HostEvent::Repaint(delay) => {
-                if delay.is_zero() {
-                    self.needs_redraw = true;
-                } else if delay < Duration::from_secs(3600) {
-                    let at = Instant::now() + delay;
+            HostEvent::Repaint(delay) => match repaint_in(delay) {
+                Some(None) => self.needs_redraw = true,
+                Some(Some(at)) => {
                     self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
                 }
-            }
+                None => {}
+            },
         }
     }
 
@@ -347,11 +345,14 @@ impl Host {
             }
         }
         let scale = overlay.scale.max(1) as u32;
-        gpu.configure(
+        if let Err(e) = gpu.configure(
             overlay.surface.as_ref().unwrap(),
             overlay.width * scale,
             overlay.height * scale,
-        );
+        ) {
+            log::error!("{e:#}");
+            return;
+        }
         overlay.layer.wl_surface().set_buffer_scale(overlay.scale);
         overlay.configured = true;
         self.needs_redraw = true;

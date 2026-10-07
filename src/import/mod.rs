@@ -33,6 +33,43 @@ pub struct Progress {
     pub total: usize,
 }
 
+/// Keeps two imports of one map (the overlay's and `dayz-map import`, say) from working in the
+/// same folder at once. Removed when dropped.
+struct ImportLock(std::path::PathBuf);
+
+impl ImportLock {
+    /// Older than this, a lock is left from a crash (imports take seconds).
+    const STALE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    fn take(map_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(map_dir)?;
+        let path = map_dir.join("import.lock");
+        for _ in 0..2 {
+            match std::fs::File::create_new(&path) {
+                Ok(_) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let age = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok());
+                    if age.is_some_and(|age| age < Self::STALE) {
+                        bail!("this map is already being imported");
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        bail!("couldn't lock {}", path.display())
+    }
+}
+
+impl Drop for ImportLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Imports a world into its map pack, replacing an older import.
 pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) -> Result<MapPack> {
     let tiles = &source.satellite;
@@ -42,6 +79,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
         .world_size
         .unwrap_or_else(|| layout.coverage(tiles.grid))
         .round();
+    maps::check_world_size(world_size).with_context(|| source.name.clone())?;
     log::info!(
         "importing {} from {}: {world_size:.0} m, {} tiles per side",
         source.name,
@@ -50,7 +88,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     );
 
     let dir = maps::maps_dir().join(&source.id);
-    std::fs::create_dir_all(&dir)?;
+    let _lock = ImportLock::take(&dir)?;
     let layer = build_layer(tiles, &layout, &dir, progress)?;
 
     write_pois(source, &dir)?;
@@ -355,6 +393,10 @@ fn downsample(image: &RgbaImage) -> RgbaImage {
 /// the same pyramid format. The picture must cover the whole terrain, north up.
 pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Result<MapPack> {
     const TILE_PX: u32 = 512;
+    if !maps::valid_id(id) {
+        anyhow::bail!("the id must be lower-case letters, digits, `_` or `-`, such as `mymap`");
+    }
+    maps::check_world_size(world_size)?;
     let mut reader = image::ImageReader::open(picture)?.with_guessed_format()?;
     reader.no_limits();
     let image = reader
@@ -377,6 +419,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         origin: [0.0, world_size],
     };
     let dir = maps::maps_dir().join(id);
+    let _lock = ImportLock::take(&dir)?;
     let layer_dir = dir.join(&layer.id);
     if layer_dir.exists() {
         std::fs::remove_dir_all(&layer_dir)?;

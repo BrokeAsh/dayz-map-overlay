@@ -26,7 +26,8 @@ impl TileLayout {
     pub fn from_rvmats(pbo: &Pbo) -> Result<Self> {
         let origin = world_uv_transform(pbo, "p_000-000")?;
         let next = world_uv_transform(pbo, "p_001-000")?;
-        if origin.aside <= 0.0 || origin.dir_v == 0.0 {
+        // (Written so NaN fails too.)
+        if !(origin.aside > 0.0 && origin.aside.is_finite()) || !(origin.dir_v != 0.0) {
             bail!("unexpected uvTransform in {}", pbo.path.display());
         }
         let tile_m = 1.0 / origin.aside;

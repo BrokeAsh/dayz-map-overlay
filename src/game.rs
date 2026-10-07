@@ -28,6 +28,8 @@ pub struct Session {
 const POLL: Duration = Duration::from_secs(1);
 /// How often to look for the logs folder again while it's missing.
 const RELOCATE: Duration = Duration::from_secs(10);
+/// How long to wait before asking a server that didn't answer for its name again.
+const QUERY_RETRY: Duration = Duration::from_secs(30);
 
 pub fn spawn(on_change: impl Fn(Session) + Send + 'static) {
     std::thread::Builder::new()
@@ -75,7 +77,8 @@ struct Watcher {
     rpt: Option<PathBuf>,
     query_port: Option<u16>,
     session: Session,
-    queried: Option<(String, String)>,
+    /// The last server-name query: its (server, map), the name, and when it ran.
+    queried: Option<((String, String), Option<String>, Instant)>,
     relocated: Option<Instant>,
 }
 
@@ -97,7 +100,8 @@ impl Watcher {
         if let Some(rpt) = newest(&dirs, "DayZ_x64_", ".RPT")
             && self.rpt.as_ref() != Some(&rpt)
         {
-            let (server, query, mods) = launch_options(&rpt);
+            let game = paths.game.as_ref().map(|g| g.path.as_path());
+            let (server, query, mods) = launch_options(&rpt, game);
             self.session.server = server;
             self.session.mods = mods;
             self.session.server_name = None;
@@ -151,9 +155,9 @@ impl Watcher {
         lines
     }
 
-    /// Asks the server for its name once per server and map, and only keeps it if the server
-    /// reports the map the game is on (the launch address is stale if the player switched
-    /// servers in game).
+    /// Asks the server for its name once per server and map (again later if it didn't answer),
+    /// and only keeps it if the server reports the map the game is on (the launch address is
+    /// stale if the player switched servers in game).
     fn update_server_name(&mut self) {
         let (Some(server), Some(world), Some(query)) =
             (&self.session.server, &self.session.world, self.query_port)
@@ -162,12 +166,16 @@ impl Watcher {
             return;
         };
         let key = (server.clone(), world.clone());
-        if self.queried.as_ref() == Some(&key) {
+        if let Some((queried, name, at)) = &self.queried
+            && *queried == key
+            && (name.is_some() || at.elapsed() < QUERY_RETRY)
+        {
+            // Also restores the name after a trip to the main menu.
+            self.session.server_name = name.clone();
             return;
         }
-        self.queried = Some(key);
         let host = server.rsplit_once(':').map_or(server.as_str(), |(h, _)| h);
-        self.session.server_name = match a2s_info(host, query) {
+        let name = match a2s_info(host, query) {
             Some((name, map)) if map.eq_ignore_ascii_case(world) => Some(name),
             Some((_, map)) => {
                 log::debug!("launch server reports {map}, not {world}; ignoring its name");
@@ -175,6 +183,8 @@ impl Watcher {
             }
             None => None,
         };
+        self.queried = Some((key, name.clone(), Instant::now()));
+        self.session.server_name = name;
     }
 }
 
@@ -187,11 +197,14 @@ fn mission_world(line: &str) -> Option<Option<String>> {
         .trim_end_matches(['\\', '/']);
     let folder = folder.rsplit(['\\', '/']).next()?.to_lowercase();
     let (mission, world) = folder.rsplit_once('.')?;
+    if !crate::maps::valid_id(world) {
+        return None;
+    }
     Some((mission != "intro" && !world.is_empty()).then(|| world.to_string()))
 }
 
 /// Server address, query port, and mod ids from the RPT's command-line line.
-fn launch_options(rpt: &Path) -> (Option<String>, Option<u16>, Vec<String>) {
+fn launch_options(rpt: &Path, game: Option<&Path>) -> (Option<String>, Option<u16>, Vec<String>) {
     let mut head = String::new();
     if let Ok(file) = std::fs::File::open(rpt) {
         let _ = file.take(64 * 1024).read_to_string(&mut head);
@@ -220,13 +233,34 @@ fn launch_options(rpt: &Path) -> (Option<String>, Option<u16>, Vec<String>) {
     let mods = option("-mod=")
         .map(|list| {
             list.split(';')
-                .filter_map(|m| m.trim().trim_matches('"').rsplit(['\\', '/']).next())
+                .map(|m| m.trim().trim_matches('"'))
                 .filter(|m| !m.is_empty())
-                .map(str::to_string)
+                .filter_map(|m| mod_id(m, game))
                 .collect()
         })
         .unwrap_or_default();
     (server, query, mods)
+}
+
+/// The id the catalog knows a `-mod=` entry by. Launchers pass links such as
+/// `!Workshop\@Deer Isle`, relative to the game folder, that point at the Workshop item's folder
+/// (`workshop/content/221100/<item id>`), so follow them; otherwise use the folder name.
+fn mod_id(entry: &str, game: Option<&Path>) -> Option<String> {
+    let name = entry.rsplit(['\\', '/']).next()?.to_string();
+    let absolute = Path::new(entry).is_absolute() || entry.contains(':');
+    if let Some(game) = game
+        && !absolute
+    {
+        let path = entry
+            .split(['\\', '/'])
+            .fold(game.to_path_buf(), |p, c| p.join(c));
+        if path.exists()
+            && let Some(real) = crate::steam::real_path(&path).file_name()
+        {
+            return Some(real.to_string_lossy().into_owned());
+        }
+    }
+    (!name.is_empty()).then_some(name)
 }
 
 fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str) -> Option<PathBuf> {
@@ -294,6 +328,26 @@ fn a2s_info(host: &str, port: u16) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn workshop_links() {
+        let root = std::env::temp_dir().join(format!("dzm-test-{}", std::process::id()));
+        let item = root.join("workshop/content/221100/1602372402");
+        let links = root.join("DayZ/!Workshop");
+        std::fs::create_dir_all(&item).unwrap();
+        std::fs::create_dir_all(&links).unwrap();
+        std::os::unix::fs::symlink(&item, links.join("@Deer Isle")).unwrap();
+        let game = root.join("DayZ");
+        let id = |entry| mod_id(entry, Some(&game));
+        assert_eq!(id(r"!Workshop\@Deer Isle").as_deref(), Some("1602372402"));
+        assert_eq!(id("@CF").as_deref(), Some("@CF"));
+        assert_eq!(
+            id(r"Z:\steam\workshop\content\221100\1559212036").as_deref(),
+            Some("1559212036")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn missions() {

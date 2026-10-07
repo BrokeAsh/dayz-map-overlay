@@ -16,6 +16,10 @@ pub struct Config {
     /// found next to the game when unset.
     pub log_dir: Option<PathBuf>,
     pub view: ViewConfig,
+    /// Set when the file couldn't be read, so saving keeps a copy instead of silently
+    /// replacing the user's settings with defaults.
+    #[serde(skip)]
+    unreadable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +44,7 @@ impl Default for Config {
             game_dir: None,
             log_dir: None,
             view: ViewConfig::default(),
+            unreadable: false,
         }
     }
 }
@@ -76,7 +81,10 @@ impl Config {
             // Windows editors may start the file with a byte-order mark.
             Ok(text) => toml::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_else(|e| {
                 log::warn!("ignoring invalid {}: {e}", path.display());
-                Self::default()
+                Self {
+                    unreadable: true,
+                    ..Self::default()
+                }
             }),
             Err(_) => Self::default(),
         }
@@ -85,6 +93,23 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         std::fs::create_dir_all(path.parent().unwrap())?;
+        // (Only while the file on disk is still the unreadable one: after the first save, it's
+        // ours.)
+        let still_unreadable = || {
+            std::fs::read_to_string(&path).is_ok_and(|text| {
+                toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).is_err()
+            })
+        };
+        if self.unreadable && still_unreadable() {
+            let backup = path.with_extension("toml.bak");
+            std::fs::copy(&path, &backup)
+                .with_context(|| format!("keeping a copy of {}", path.display()))?;
+            log::warn!(
+                "{} had errors; kept it as {}",
+                path.display(),
+                backup.display()
+            );
+        }
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))

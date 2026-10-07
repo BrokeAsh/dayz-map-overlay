@@ -80,13 +80,20 @@ pub fn parse(data: &[u8]) -> Result<Class> {
     if !data.starts_with(b"\0raP") {
         bail!("not a rapified config");
     }
-    let mut reader = Reader { data, depth: 0 };
+    let mut reader = Reader {
+        data,
+        depth: 0,
+        budget: data.len(),
+    };
     reader.class_body(16)
 }
 
 struct Reader<'a> {
     data: &'a [u8],
     depth: usize,
+    /// Entries and array items left to read. Each takes at least a byte, so a real config never
+    /// runs out; a crafted one whose classes share bodies would otherwise parse exponentially.
+    budget: usize,
 }
 
 impl Reader<'_> {
@@ -139,10 +146,28 @@ impl Reader<'_> {
         })
     }
 
-    fn array(&self, i: &mut usize) -> Result<Vec<Value>> {
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > 64 {
+            bail!("config nesting is too deep");
+        }
+        Ok(())
+    }
+
+    fn spend(&mut self) -> Result<()> {
+        self.budget = self
+            .budget
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("config refers to its classes in a loop"))?;
+        Ok(())
+    }
+
+    fn array(&mut self, i: &mut usize) -> Result<Vec<Value>> {
+        self.enter()?;
         let count = self.compressed(i)?;
         let mut items = Vec::with_capacity(count.min(4096));
         for _ in 0..count {
+            self.spend()?;
             let kind = self.byte(i)?;
             items.push(if kind == 3 {
                 Value::Array(self.array(i)?)
@@ -150,19 +175,18 @@ impl Reader<'_> {
                 self.scalar(kind, i)?
             });
         }
+        self.depth -= 1;
         Ok(items)
     }
 
     fn class_body(&mut self, offset: usize) -> Result<Class> {
-        self.depth += 1;
-        if self.depth > 64 {
-            bail!("config nesting is too deep");
-        }
+        self.enter()?;
         let mut i = offset;
         let _parent = self.string(&mut i)?;
         let count = self.compressed(&mut i)?;
         let mut class = Class::default();
         for _ in 0..count {
+            self.spend()?;
             match self.byte(&mut i)? {
                 0 => {
                     let name = self.string(&mut i)?;

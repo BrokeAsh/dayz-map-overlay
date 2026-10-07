@@ -30,6 +30,21 @@ pub struct Pbo {
     /// The `prefix` header property, e.g. `DZ\worlds\enoch\data`.
     pub prefix: String,
     pub entries: Vec<PboEntry>,
+    /// The file's `stamp` when the header was read; entry offsets are only good while it holds.
+    pub opened: String,
+}
+
+/// Size and modification time, which change when Steam updates the file.
+pub fn stamp(path: &Path) -> String {
+    std::fs::metadata(path)
+        .map(|m| {
+            let modified = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok());
+            format!("{}:{}", m.len(), modified.map_or(0, |d| d.as_secs()))
+        })
+        .unwrap_or_default()
 }
 
 fn read_cstr(r: &mut impl BufRead) -> Result<String> {
@@ -49,6 +64,7 @@ fn read_u32(r: &mut impl Read) -> Result<u32> {
 
 impl Pbo {
     pub fn open(path: &Path) -> Result<Self> {
+        let opened = stamp(path);
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let mut r = BufReader::new(file);
         let mut prefix = String::new();
@@ -100,14 +116,26 @@ impl Pbo {
             path: path.to_owned(),
             prefix,
             entries,
+            opened,
         })
+    }
+
+    /// Whether the file changed since it was opened (a mod update), so its entries are stale.
+    pub fn changed(&self) -> bool {
+        stamp(&self.path) != self.opened
     }
 
     pub fn read(&self, entry: &PboEntry) -> Result<Vec<u8>> {
         let data = self.read_raw(entry, entry.size as usize)?;
         match entry.method {
             0 => Ok(data),
-            CPRS => Ok(super::lzss::decompress(&data, entry.original_size as usize)),
+            CPRS => {
+                let data = super::lzss::decompress(&data, entry.original_size as usize);
+                if data.len() != entry.original_size as usize {
+                    bail!("{}: corrupt compressed entry", entry.name);
+                }
+                Ok(data)
+            }
             other => bail!("{}: unknown packing method 0x{other:08x}", entry.name),
         }
     }
@@ -124,6 +152,15 @@ impl Pbo {
 
     fn read_raw(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {
         let mut file = File::open(&self.path)?;
+        // Sizes come from the header; check them against the file before allocating.
+        if entry.offset + u64::from(entry.size) > file.metadata()?.len() {
+            bail!(
+                "{}: {} is shorter than its header says (it may have changed since it was \
+                 scanned)",
+                entry.name,
+                self.path.display()
+            );
+        }
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut data = vec![0; len.min(entry.size as usize)];
         file.read_exact(&mut data)?;

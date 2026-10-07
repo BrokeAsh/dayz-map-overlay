@@ -12,9 +12,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
-use super::pbo::Pbo;
+use super::pbo::{Pbo, stamp};
 use super::poi::Place;
 use super::{poi, rap, wrp};
 use crate::maps;
@@ -103,7 +102,8 @@ impl WorldSource {
         parts.join("|")
     }
 
-    /// Changes when the files the points of interest come from change.
+    /// Changes when the files the points of interest come from change (including the scripts
+    /// that say which buildings are wells).
     pub fn pois_fingerprint(&self) -> String {
         let mut parts = vec![POI_VERSION.to_string()];
         for pbo in self
@@ -111,11 +111,21 @@ impl WorldSource {
             .iter()
             .map(|e| &e.pbo)
             .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.scripts)
         {
             parts.push(pbo.path.display().to_string());
             parts.push(stamp(&pbo.path));
         }
         parts.join("|")
+    }
+
+    /// Whether any of its archives changed since the scan, so their entry offsets are stale.
+    pub fn changed_since_scan(&self) -> bool {
+        std::iter::once(&self.satellite.pbo)
+            .chain(self.economy.iter().map(|e| &e.pbo))
+            .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.scripts)
+            .any(|pbo| pbo.changed())
     }
 
     pub fn source_label(&self) -> String {
@@ -258,6 +268,10 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         used_tiles[i] = true;
         let economy = best_economy(&economies, &def.mod_id, &def.anchor);
         let id = def.class.to_lowercase();
+        if !maps::valid_id(&id) {
+            log::warn!("skipping a world with an unusable name: {:?}", def.class);
+            continue;
+        }
         let mut world_scripts = scripts.get(&None).cloned().unwrap_or_default();
         if def.mod_id.is_some() {
             world_scripts.extend(scripts.get(&def.mod_id).into_iter().flatten().cloned());
@@ -282,7 +296,7 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             continue;
         }
         let id = world_name(&source.pbo.prefix);
-        if id.is_empty()
+        if !maps::valid_id(&id)
             || worlds
                 .iter()
                 .any(|w| w.id == id && w.mod_id == archive.mod_id)
@@ -441,7 +455,9 @@ fn tile_source(pbo: &Arc<Pbo>) -> Option<TileSource> {
         let Some((x, y)) = coords.split_once('_') else {
             continue;
         };
-        if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
+        // Real terrains have at most a few dozen tiles per side; a stray name like
+        // `s_99999_000` mustn't make a grid of billions.
+        if let (Ok(x @ 0..1024), Ok(y @ 0..1024)) = (x.parse::<u32>(), y.parse::<u32>()) {
             tiles.insert((x, y), index);
         }
     }
@@ -542,18 +558,6 @@ fn world_defs(archive: &Archive) -> Vec<WorldDef> {
             })
         })
         .collect()
-}
-
-fn stamp(path: &Path) -> String {
-    std::fs::metadata(path)
-        .map(|m| {
-            let modified = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok());
-            format!("{}:{}", m.len(), modified.map_or(0, |d| d.as_secs()))
-        })
-        .unwrap_or_default()
 }
 
 fn display_name(id: &str, description: Option<&str>) -> String {

@@ -46,8 +46,15 @@ impl Gpu {
     }
 
     /// Sizes the surface (in pixels) for see-through drawing.
-    pub fn configure(&mut self, surface: &wgpu::Surface, width: u32, height: u32) {
+    pub fn configure(&mut self, surface: &wgpu::Surface, width: u32, height: u32) -> Result<()> {
         let caps = surface.get_capabilities(&self.adapter);
+        if caps.formats.is_empty() || caps.alpha_modes.is_empty() {
+            anyhow::bail!(
+                "{} can't draw to this display; with several GPUs, try running on the one \
+                 the monitor is connected to",
+                self.adapter.get_info().name
+            );
+        }
         let format = match &self.renderer {
             Some((_, format)) => *format,
             None => {
@@ -74,7 +81,10 @@ impl Gpu {
             );
             caps.alpha_modes[0]
         };
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        // Windows has no frame callbacks to pace redraws, so wait for the display there.
+        let present_mode = if cfg!(windows) {
+            wgpu::PresentMode::Fifo
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
@@ -93,6 +103,7 @@ impl Gpu {
                 view_formats: vec![],
             },
         );
+        Ok(())
     }
 
     /// Draws egui's output, faded by `opacity` (0 to 1). `before_present` runs just before the
@@ -125,13 +136,23 @@ impl Gpu {
                 renderer.update_texture(device, queue, *id, delta);
             }
         }
+        // egui reports each freed texture only once, so free them even if nothing is drawn.
+        let free = |renderer: &mut egui_wgpu::Renderer| {
+            for id in &output.textures_delta.free {
+                renderer.free_texture(id);
+            }
+        };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                free(renderer);
                 return Frame::Skipped;
             }
-            _ => return Frame::Outdated,
+            _ => {
+                free(renderer);
+                return Frame::Outdated;
+            }
         };
         let view = frame
             .texture
@@ -165,9 +186,7 @@ impl Gpu {
         queue.submit(commands);
         before_present();
         queue.present(frame);
-        for id in &output.textures_delta.free {
-            renderer.free_texture(id);
-        }
+        free(renderer);
         Frame::Presented
     }
 
@@ -221,11 +240,20 @@ impl Fade {
 
 /// When egui wants its next frame: `None` for never, `Some(None)` for now.
 pub fn repaint_after(output: &egui::FullOutput) -> Option<Option<Instant>> {
-    let viewport = output.viewport_output.get(&egui::ViewportId::ROOT)?;
-    if viewport.repaint_delay.is_zero() {
+    repaint_in(
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)?
+            .repaint_delay,
+    )
+}
+
+/// The same for a delay egui asked for (it uses a huge delay to mean "never").
+pub fn repaint_in(delay: Duration) -> Option<Option<Instant>> {
+    if delay.is_zero() {
         Some(None)
-    } else if viewport.repaint_delay < Duration::from_secs(3600) {
-        Some(Some(Instant::now() + viewport.repaint_delay))
+    } else if delay < Duration::from_secs(3600) {
+        Some(Some(Instant::now() + delay))
     } else {
         None
     }

@@ -32,10 +32,9 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
             let Ok(data) = pbo.read(entry) else {
                 continue;
             };
+            // Every file: a class can extend `Well` through others declared elsewhere
+            // (`LabTap extends Sink`, with `Sink extends Well` in another file).
             let text = String::from_utf8_lossy(&data);
-            if !text.contains("Well") {
-                continue;
-            }
             for (class, parent) in class_declarations(&text) {
                 parents.insert(class, parent);
             }
