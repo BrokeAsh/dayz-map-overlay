@@ -16,7 +16,7 @@ jobs:
     # The oldest supported runner, so the binary runs on older glibc versions too.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev pkg-config
       - run: cargo test --release
