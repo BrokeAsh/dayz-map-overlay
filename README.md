@@ -10,12 +10,34 @@ It's written in Rust and currently targets Linux desktops that support layer-she
 game process: it reads the game's files and logs, draws its own window above the game, and
 listens for the hotkey the way any X11 app can, so BattlEye has nothing to see.
 
-## Use
+## Requirements
+
+- Linux with a Wayland desktop that supports layer-shell overlays: KDE Plasma 6, Sway,
+  Hyprland, and other wlroots desktops. GNOME and X11 sessions aren't supported yet.
+- A GPU with Vulkan (any gaming GPU and driver from the last several years).
+- DayZ through Steam (Proton). DayZ is found through Steam's library list, including extra
+  library drives and the Flatpak and Snap versions of Steam, so there's usually nothing to set.
+
+## Install
+
+Download `dayz-map-<version>-linux-x86_64.tar.gz` from the
+[releases](https://github.com/BrokeAsh/dayz-map-overlay/releases), then:
 
 ```sh
-cargo build --release
-./target/release/dayz-map          # run in the background
+tar xzf dayz-map-*-linux-x86_64.tar.gz
+install -Dm755 dayz-map-*/dayz-map ~/.local/bin/dayz-map
+dayz-map status          # check that it found DayZ, the Workshop folder and the logs
+dayz-map autostart on    # start with your desktop (`off` to undo)
+dayz-map &               # or start it now
 ```
+
+`~/.local/bin` must be on your `PATH` for the short commands; the autostart entry uses the full
+path either way.
+
+To build it yourself, install Rust and the Wayland and xkbcommon development packages
+(`libwayland-dev libxkbcommon-dev` on Debian and Ubuntu), then run `cargo build --release`.
+
+## Use
 
 Join a server and press **M**. The first time you join a map it takes a couple of seconds
 (during the loading screen) to build it. Like the Steam overlay, the game stays focused and keeps
@@ -42,14 +64,11 @@ the game or change `hotkey`.
 Other commands:
 
 - `dayz-map toggle | show | hide | quit` control the running overlay.
-- `dayz-map status` shows what the overlay sees: game running, map, server, and mods.
+- `dayz-map status` shows the folders it found (and how), and what the game is doing: running,
+  map, server, and mods.
+- `dayz-map autostart on | off` starts the overlay when you log in, or stops doing that.
 - `dayz-map list` shows installed maps and every terrain found in the game and Workshop folders.
 - `dayz-map import <world>…` or `--all` builds maps ahead of time.
-
-### Start automatically
-
-Copy `packaging/dayz-map-overlay.desktop` to `~/.config/autostart/` and put the `dayz-map`
-binary on your `PATH` (for example `~/.local/bin`).
 
 ## Maps
 
@@ -98,7 +117,8 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 ```toml
 hotkey = "m"                                  # a character, f1–f24, or a keysym like 0x6d
 window_match = ["steam_app_221100", "DayZ"]   # opens only when the focused window matches
-# game_dir = "/path/to/steamapps/common/DayZ" # if Steam auto-detection fails
+# game_dir = "/path/to/steamapps/common/DayZ" # only if DayZ isn't found automatically
+# log_dir = "/path/to/DayZ/logs"              # only if `dayz-map status` can't find the logs
 
 [view]
 map = "chernarusplus"   # last map shown
@@ -111,8 +131,21 @@ show_places = true
 civilian = false
 ```
 
-`DAYZ_MAP_LOG_DIR` points the session watcher at a different log folder (useful for testing
-with recorded logs).
+If DayZ isn't in any Steam library, the Maps window says so and offers **Choose the DayZ
+folder…**, which saves `game_dir` for you. The Workshop folder and the logs are then worked out
+from the game's library (or from the game's `!Workshop` links), so `log_dir` is rarely needed.
+`DAYZ_MAP_LOG_DIR` overrides the log folder for one run (useful for testing with recorded logs).
+
+## Troubleshooting
+
+- **M does nothing:** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
+  `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
+  it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a
+  workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings.
+- **The map doesn't follow the server:** `dayz-map status` should show a Logs folder and, while
+  you're on a server, the map and server name.
+- **A map is missing:** `dayz-map list` shows every terrain found; Rescan in the Maps window
+  picks up newly downloaded mods.
 
 ## How it works
 
@@ -142,8 +175,6 @@ with recorded logs).
 
 ## Not done yet
 
-- Every well and other non-loot objects: these need the terrain's full object list from the
-  `.wrp`.
 - Server-specific loot and events (servers don't share their economy files).
 - Windows and X11-only desktops (the UI and importer are portable; they need a window host).
 - GNOME, which doesn't support layer-shell.

@@ -5,6 +5,7 @@ mod import;
 mod ipc;
 mod library;
 mod maps;
+mod paths;
 mod steam;
 mod trigger;
 mod ui;
@@ -23,6 +24,12 @@ struct Cli {
     command: Option<Cmd>,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the overlay in the background (the default).
@@ -39,6 +46,11 @@ enum Cmd {
     Hide,
     /// Stop the running overlay.
     Quit,
+    /// Start the overlay when you log in (`on`), or stop doing that (`off`).
+    Autostart {
+        #[arg(value_enum)]
+        state: Switch,
+    },
     /// List installed maps and the maps found in the game and Workshop folders.
     List,
     /// Show what the game is doing right now (map, server, mods), as the overlay sees it.
@@ -77,8 +89,9 @@ fn main() -> Result<()> {
         Cmd::Hide => ipc::send(ipc::Command::Hide),
         Cmd::Quit => ipc::send(ipc::Command::Quit),
         Cmd::List => list(&Config::load()),
+        Cmd::Autostart { state } => autostart(matches!(state, Switch::On)),
         Cmd::Status => {
-            println!("{:#?}", game::snapshot());
+            status(&Config::load());
             Ok(())
         }
         Cmd::Import { worlds, all } => import(&Config::load(), &worlds, all),
@@ -96,12 +109,106 @@ fn main() -> Result<()> {
     }
 }
 
-fn scan(config: &Config) -> import::Catalog {
-    let game_dir = config.game_dir();
-    if game_dir.is_none() {
-        eprintln!("DayZ install not found through Steam; set game_dir in the config.");
+/// Adds or removes a login entry (`~/.config/autostart`) that runs this binary.
+fn autostart(on: bool) -> Result<()> {
+    let dirs = directories::BaseDirs::new().context("no home directory")?;
+    let entry = dirs.config_dir().join("autostart/dayz-map-overlay.desktop");
+    if !on {
+        match std::fs::remove_file(&entry) {
+            Ok(()) => println!("Removed {}", entry.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("Autostart was off"),
+            Err(e) => return Err(e).context(format!("removing {}", entry.display())),
+        }
+        return Ok(());
     }
-    import::catalog::scan(&import::catalog::roots(game_dir.as_deref()))
+    let exe = std::env::current_exe()?.canonicalize()?;
+    // Desktop entries quote arguments with double quotes and escape `"`, `` ` ``, `$` and `\`.
+    let quoted: String = exe
+        .to_string_lossy()
+        .chars()
+        .flat_map(|c| {
+            let escape = matches!(c, '"' | '`' | '$' | '\\');
+            escape.then_some('\\').into_iter().chain([c])
+        })
+        .collect();
+    let text = format!(
+        "[Desktop Entry]\nType=Application\nName=DayZ Map Overlay\n\
+         Comment=Press M in DayZ to open a see-through map\nExec=\"{quoted}\" run\n\
+         Icon=map-flat\nTerminal=false\nNoDisplay=true\nX-KDE-autostart-phase=2\n"
+    );
+    std::fs::create_dir_all(entry.parent().unwrap())?;
+    std::fs::write(&entry, text).with_context(|| format!("writing {}", entry.display()))?;
+    println!(
+        "The overlay will start when you log in ({}).",
+        entry.display()
+    );
+    Ok(())
+}
+
+/// What the overlay found on this machine, and what the game is doing.
+fn status(config: &Config) {
+    let paths = paths::refresh(config);
+    let show = |label: &str, found: &[paths::Located], missing: &str| {
+        if found.is_empty() {
+            println!("{label:<10}{missing}");
+        }
+        for (i, f) in found.iter().enumerate() {
+            let label = if i == 0 { label } else { "" };
+            println!("{label:<10}{} (from {})", f.path.display(), f.how);
+        }
+    };
+    show(
+        "DayZ",
+        paths.game.as_slice(),
+        "not found; set game_dir in the config",
+    );
+    show(
+        "Workshop",
+        &paths.workshop,
+        "not found (only the base game's maps are available)",
+    );
+    show(
+        "Logs",
+        &paths.logs,
+        "not found yet (DayZ creates them the first time it runs); set log_dir if this persists",
+    );
+    println!("{:<10}{}", "Config", config::config_path().display());
+    println!("{:<10}{}", "Maps", maps::maps_dir().display());
+    for warning in &paths.warnings {
+        println!("warning: {warning}");
+    }
+    let session = game::snapshot();
+    let state = match (&session.running, &session.world) {
+        (false, _) => "not running".to_string(),
+        (true, None) => "main menu".to_string(),
+        (true, Some(world)) => {
+            let server = session
+                .server_name
+                .clone()
+                .or(session.server.clone())
+                .map(|s| format!(" on {s}"))
+                .unwrap_or_default();
+            format!("playing {world}{server}")
+        }
+    };
+    println!("{:<10}{state}", "Game");
+    if !session.mods.is_empty() {
+        println!("{:<10}{}", "Mods", session.mods.join(", "));
+    }
+}
+
+fn scan(config: &Config) -> import::Catalog {
+    let paths = paths::refresh(config);
+    for warning in &paths.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if paths.game.is_none() {
+        eprintln!(
+            "DayZ wasn't found in any Steam library; set game_dir in {}.",
+            config::config_path().display()
+        );
+    }
+    import::catalog::scan(&import::catalog::roots(&paths))
 }
 
 fn list(config: &Config) -> Result<()> {

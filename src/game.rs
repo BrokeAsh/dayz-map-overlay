@@ -10,7 +10,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Session {
@@ -25,6 +25,8 @@ pub struct Session {
 }
 
 const POLL: Duration = Duration::from_secs(1);
+/// How often to look for the logs folder again while it's missing.
+const RELOCATE: Duration = Duration::from_secs(10);
 
 pub fn spawn(on_change: impl Fn(Session) + Send + 'static) {
     std::thread::Builder::new()
@@ -73,6 +75,7 @@ struct Watcher {
     query_port: Option<u16>,
     session: Session,
     queried: Option<(String, String)>,
+    relocated: Option<Instant>,
 }
 
 impl Watcher {
@@ -82,7 +85,13 @@ impl Watcher {
             return Session::default();
         }
         self.session.running = true;
-        let dirs = crate::steam::log_dirs();
+        let mut paths = crate::paths::current();
+        // The logs folder appears the first time the game runs.
+        if paths.logs.is_empty() && self.relocated.is_none_or(|t| t.elapsed() > RELOCATE) {
+            self.relocated = Some(Instant::now());
+            paths = crate::paths::refresh(&crate::config::Config::load());
+        }
+        let dirs: Vec<PathBuf> = paths.logs.iter().map(|l| l.path.clone()).collect();
 
         if let Some(rpt) = newest(&dirs, "DayZ_x64_", ".RPT")
             && self.rpt.as_ref() != Some(&rpt)

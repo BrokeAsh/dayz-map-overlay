@@ -3,11 +3,10 @@
 //! maps built by older versions. All the work happens on one background thread.
 
 use crossbeam_channel::{Receiver, Sender};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::import::{self, Catalog, WorldSource, catalog};
-use crate::maps;
+use crate::{maps, paths};
 
 #[derive(Debug, Clone)]
 pub struct Job {
@@ -41,11 +40,10 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new(game_dir: Option<PathBuf>, ctx: egui::Context) -> Self {
+    pub fn new(ctx: egui::Context) -> Self {
         let (requests, rx) = crossbeam_channel::unbounded();
         let state = Arc::new(Mutex::new(LibraryState::default()));
         let worker = Worker {
-            roots: catalog::roots(game_dir.as_deref()),
             state: state.clone(),
             ctx,
         };
@@ -55,6 +53,12 @@ impl Library {
             .expect("spawning the library worker");
         let _ = requests.send(Request::Scan);
         Self { requests, state }
+    }
+
+    /// Looks for the game again (after the user picked its folder) and rescans.
+    pub fn relocate(&self, config: &crate::config::Config) {
+        paths::refresh(config);
+        self.rescan();
     }
 
     /// Makes sure `world` is imported and current, then marks it ready to show.
@@ -75,7 +79,6 @@ impl Library {
 }
 
 struct Worker {
-    roots: Vec<(PathBuf, bool)>,
     state: Arc<Mutex<LibraryState>>,
     ctx: egui::Context,
 }
@@ -110,7 +113,7 @@ impl Worker {
     fn scan(&self) -> Arc<Catalog> {
         self.update(|s| s.scanning = true);
         let start = std::time::Instant::now();
-        let catalog = Arc::new(catalog::scan(&self.roots));
+        let catalog = Arc::new(catalog::scan(&catalog::roots(&paths::current())));
         log::info!(
             "found {} terrains in {:.1?}",
             catalog.unique().len(),

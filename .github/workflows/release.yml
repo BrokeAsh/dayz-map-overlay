@@ -1,0 +1,36 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the Linux binary and publish it as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported runner, so the binary runs on older glibc versions too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev pkg-config
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package
+        run: |
+          name="dayz-map-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir "$name"
+          cp target/release/dayz-map README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dayz-map-*.tar.gz dayz-map-*.tar.gz.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes

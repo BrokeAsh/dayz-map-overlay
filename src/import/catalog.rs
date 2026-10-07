@@ -181,13 +181,13 @@ impl Catalog {
 }
 
 /// Where to look: the game folder and each Workshop content folder.
-pub fn roots(game_dir: Option<&Path>) -> Vec<(PathBuf, bool)> {
-    let mut roots: Vec<(PathBuf, bool)> = game_dir
-        .map(|d| (d.to_owned(), false))
-        .into_iter()
-        .collect();
-    roots.extend(crate::steam::workshop_dirs().into_iter().map(|d| (d, true)));
-    roots
+pub fn roots(paths: &crate::paths::Paths) -> Vec<(PathBuf, bool)> {
+    paths
+        .game
+        .iter()
+        .map(|g| (g.path.clone(), false))
+        .chain(paths.workshop.iter().map(|w| (w.path.clone(), true)))
+        .collect()
 }
 
 struct Archive {

@@ -12,6 +12,9 @@ pub struct Config {
     pub window_match: Vec<String>,
     /// DayZ install folder; found through Steam when unset.
     pub game_dir: Option<PathBuf>,
+    /// Folder where DayZ writes its logs (`script_*.log`), used to tell which server you're on;
+    /// found next to the game when unset.
+    pub log_dir: Option<PathBuf>,
     pub view: ViewConfig,
 }
 
@@ -35,6 +38,7 @@ impl Default for Config {
             hotkey: "m".into(),
             window_match: vec!["steam_app_221100".into(), "DayZ".into()],
             game_dir: None,
+            log_dir: None,
             view: ViewConfig::default(),
         }
     }
@@ -83,12 +87,5 @@ impl Config {
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
-    }
-
-    pub fn game_dir(&self) -> Option<PathBuf> {
-        self.game_dir
-            .clone()
-            .filter(|d| d.is_dir())
-            .or_else(crate::steam::find_dayz)
     }
 }

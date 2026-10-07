@@ -1,60 +1,59 @@
-//! Locates the DayZ install through Steam's library list.
+//! Steam's install folders and library list.
 
 use std::path::{Path, PathBuf};
 
-pub fn find_dayz() -> Option<PathBuf> {
-    library_folders()
-        .into_iter()
-        .map(|lib| lib.join("steamapps/common/DayZ"))
-        .find(|d| d.join("Addons").is_dir())
-}
+/// DayZ's Steam app id.
+pub const DAYZ_APP: &str = "221100";
 
-fn library_folders() -> Vec<PathBuf> {
+/// Where Steam itself may be installed.
+fn steam_roots() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let roots = [
+    vec![
         home.join(".local/share/Steam"),
         home.join(".steam/steam"),
+        home.join(".steam/root"),
+        // Flatpak and Snap packages of Steam.
         home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+        home.join("snap/steam/common/.local/share/Steam"),
         PathBuf::from(r"C:\Program Files (x86)\Steam"),
-    ];
+    ]
+}
+
+/// Every Steam library folder (each has a `steamapps` folder), from each Steam install's
+/// `libraryfolders.vdf`.
+pub fn library_folders() -> Vec<PathBuf> {
     let mut libraries = Vec::new();
-    for root in roots {
+    for root in steam_roots() {
         let vdf = root.join("steamapps/libraryfolders.vdf");
         if let Ok(text) = std::fs::read_to_string(&vdf) {
             libraries.extend(parse_paths(&text));
         }
         libraries.push(root);
     }
-    // `~/.steam/steam` usually links to `~/.local/share/Steam`; keep each folder once.
+    dedup_dirs(libraries)
+}
+
+/// Keeps existing folders, each once (`~/.steam/steam` usually links to `~/.local/share/Steam`).
+pub fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
-    libraries.retain(|l| l.is_dir() && seen.insert(l.canonicalize().unwrap_or_else(|_| l.clone())));
-    libraries
-}
-
-/// Each library's DayZ Workshop folder (`steamapps/workshop/content/221100`).
-pub fn workshop_dirs() -> Vec<PathBuf> {
-    library_folders()
-        .into_iter()
-        .map(|lib| lib.join("steamapps/workshop/content/221100"))
-        .filter(|d| d.is_dir())
+    dirs.into_iter()
+        .filter(|d| d.is_dir() && seen.insert(d.canonicalize().unwrap_or_else(|_| d.clone())))
         .collect()
 }
 
-/// Each library's Proton prefix folder where DayZ writes its logs. `DAYZ_MAP_LOG_DIR`
-/// overrides this (for unusual setups, or to test with recorded logs).
-pub fn log_dirs() -> Vec<PathBuf> {
-    if let Some(dir) = std::env::var_os("DAYZ_MAP_LOG_DIR") {
-        return vec![PathBuf::from(dir)];
-    }
-    library_folders()
-        .into_iter()
-        .map(|lib| {
-            lib.join("steamapps/compatdata/221100/pfx/drive_c/users/steamuser/AppData/Local/DayZ")
-        })
-        .filter(|d| d.is_dir())
-        .collect()
+/// The library a game folder (`<library>/steamapps/common/<game>`) belongs to.
+pub fn library_of(game_dir: &Path) -> Option<PathBuf> {
+    let common = game_dir.parent()?;
+    let steamapps = common.parent()?;
+    let named = |p: &Path, name: &str| {
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+    };
+    (named(common, "common") && named(steamapps, "steamapps"))
+        .then(|| steamapps.parent().map(Path::to_owned))
+        .flatten()
 }
 
 /// Pulls the `"path"  "..."` values out of `libraryfolders.vdf`.
@@ -66,4 +65,18 @@ fn parse_paths(vdf: &str) -> Vec<PathBuf> {
         })
         .map(|p| Path::new(&p.replace("\\\\", "\\")).to_owned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_library_of_a_game() {
+        assert_eq!(
+            library_of(Path::new("/games/SteamLibrary/steamapps/common/DayZ")),
+            Some(PathBuf::from("/games/SteamLibrary"))
+        );
+        assert_eq!(library_of(Path::new("/opt/DayZ")), None);
+    }
 }

@@ -10,6 +10,7 @@ use egui::{
     Stroke, StrokeKind, Vec2,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -83,6 +84,10 @@ pub struct OverlayApp {
     session: Session,
     show_maps_window: bool,
     close_requested: bool,
+    /// The folder the user is picking for the game, delivered by the dialog's thread.
+    picked_game_dir: Option<crossbeam_channel::Receiver<Option<PathBuf>>>,
+    /// Feedback for the Maps window, such as a picked folder that isn't DayZ.
+    notice: Option<String>,
 }
 
 impl OverlayApp {
@@ -90,7 +95,7 @@ impl OverlayApp {
         let mut style = (*ctx.global_style()).clone();
         style.visuals = egui::Visuals::dark();
         ctx.set_global_style(style);
-        let library = Library::new(config.game_dir(), ctx.clone());
+        let library = Library::new(ctx.clone());
         let mut app = Self {
             config,
             maps: Vec::new(),
@@ -103,6 +108,8 @@ impl OverlayApp {
             session: Session::default(),
             show_maps_window: false,
             close_requested: false,
+            picked_game_dir: None,
+            notice: None,
         };
         app.reload_maps();
         app
@@ -176,6 +183,7 @@ impl OverlayApp {
         let screen = ui.max_rect();
         self.tiles.begin_frame(&ctx);
         self.sync_library();
+        self.take_picked_game_dir();
 
         let dim = (self.config.view.backdrop_opacity.clamp(0.0, 1.0) * 255.0) as u8;
         ui.painter()
@@ -185,10 +193,68 @@ impl OverlayApp {
             self.map_view(ui, index, screen);
         }
         self.toolbar(&ctx);
-        if self.show_maps_window || self.maps.is_empty() {
+        let game_missing = crate::paths::current().game.is_none();
+        if self.show_maps_window || self.maps.is_empty() || game_missing {
             self.maps_window(&ctx);
         }
         self.tiles.end_frame();
+    }
+
+    /// Opens the system folder picker. The overlay closes meanwhile (it would cover the dialog)
+    /// and reopens with the result.
+    fn pick_game_dir(&mut self) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.picked_game_dir = Some(rx);
+        self.close_requested = true;
+        let start = crate::steam::library_folders().into_iter().next();
+        std::thread::spawn(move || {
+            let mut dialog = rfd::FileDialog::new().set_title("Choose your DayZ folder");
+            if let Some(dir) = start {
+                dialog = dialog.set_directory(dir);
+            }
+            let _ = tx.send(dialog.pick_folder());
+            let _ = crate::ipc::send(crate::ipc::Command::Show);
+        });
+    }
+
+    fn take_picked_game_dir(&mut self) {
+        let Some(picked) = self
+            .picked_game_dir
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        else {
+            return;
+        };
+        self.picked_game_dir = None;
+        let Some(dir) = picked else {
+            return;
+        };
+        // Accept the library or `common` folder too.
+        let found = [
+            dir.clone(),
+            dir.join("DayZ"),
+            dir.join("common/DayZ"),
+            dir.join("steamapps/common/DayZ"),
+        ]
+        .into_iter()
+        .find(|d| crate::paths::is_game_dir(d));
+        match found {
+            Some(game) => {
+                log::info!("using the DayZ folder {}", game.display());
+                self.notice = None;
+                self.config.game_dir = Some(game);
+                if let Err(e) = self.config.save() {
+                    log::warn!("saving settings: {e:#}");
+                }
+                self.library.relocate(&self.config);
+            }
+            None => {
+                self.notice = Some(format!(
+                    "{} isn't a DayZ folder (it should contain DayZ_x64.exe and Addons).",
+                    dir.display()
+                ));
+            }
+        }
     }
 
     fn current_pois(&mut self) -> Option<Arc<LoadedPois>> {
@@ -629,6 +695,23 @@ impl OverlayApp {
             ui.set_min_width(420.0);
             ui.label("The map switches automatically when you join a server. You can also look at other maps here.");
             ui.add_space(6.0);
+            if crate::paths::current().game.is_none() {
+                ui.colored_label(
+                    Color32::from_rgb(255, 170, 120),
+                    "DayZ wasn't found in your Steam libraries.",
+                );
+                if ui
+                    .add_enabled(self.picked_game_dir.is_none(), egui::Button::new("Choose the DayZ folder…"))
+                    .clicked()
+                {
+                    self.pick_game_dir();
+                }
+                ui.add_space(6.0);
+            }
+            if let Some(notice) = &self.notice {
+                ui.colored_label(Color32::from_rgb(255, 170, 120), notice);
+                ui.add_space(6.0);
+            }
             let Some(catalog) = &catalog else {
                 ui.horizontal(|ui| {
                     ui.spinner();
