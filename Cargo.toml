@@ -24,11 +24,28 @@ raw-window-handle = "0.6"
 rfd = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-smithay-client-toolkit = "0.21"
 texpresso = "2"
 toml = "1.1.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+smithay-client-toolkit = "0.21"
 wayland-client = { version = "0.31", features = ["system"] }
 x11rb = { version = "0.14", features = ["xinput"] }
+
+[target.'cfg(windows)'.dependencies]
+egui-winit = { version = "0.36", default-features = false }
+winit = "0.30"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 lto = "thin"

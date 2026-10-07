@@ -1,7 +1,8 @@
 //! Works out which map DayZ is on by following its logs.
 //!
-//! DayZ (through Proton) writes `script_<date>.log` and `DayZ_x64_<date>.RPT` into the Proton
-//! prefix. Each time it starts a mission the script log gets a line like
+//! DayZ writes `script_<date>.log` and `DayZ_x64_<date>.RPT` into its profile folder
+//! (`%LOCALAPPDATA%\DayZ`, inside the Proton prefix on Linux). Each time it starts a mission
+//! the script log gets a line like
 //! `Creating Mission: mpmissions\__cur_mp.deerisle\mission.c`: the mission folder is named
 //! `<mission>.<world>`, and `intro.<world>` is the main-menu background. The RPT's third line is
 //! the game's command line, with `-connect=ip:port:queryport` and `-mod=...` when a launcher
@@ -242,6 +243,12 @@ fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
+#[cfg(windows)]
+fn dayz_running() -> bool {
+    crate::win::process_running("DayZ_x64.exe")
+}
+
+#[cfg(not(windows))]
 fn dayz_running() -> bool {
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return false;

@@ -42,6 +42,7 @@ use wayland_client::{
 };
 
 use super::HostEvent;
+use super::gpu::{Fade, Frame, Gpu, repaint_after};
 use crate::config::Config;
 use crate::ipc::{self, Command};
 use crate::ui::OverlayApp;
@@ -120,7 +121,10 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         keyboard: None,
         pointer: None,
         cursor: CursorIcon::Default,
-        gpu: Gpu::new()?,
+        gpu: Gpu::new(wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        }))?,
         overlay: None,
         app: OverlayApp::new(&egui_ctx, config),
         egui_ctx,
@@ -132,8 +136,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         needs_redraw: false,
         next_repaint: None,
         last_hide: Instant::now() - REOPEN_GRACE,
-        shown_at: Instant::now(),
-        fade_in: own_fade(),
+        fade: Fade::new(own_fade()),
         game_center: None,
         exit: false,
     };
@@ -158,42 +161,6 @@ pub fn run(config: Config, show: bool) -> Result<()> {
     host.hide();
     ipc::cleanup();
     Ok(())
-}
-
-struct Gpu {
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    /// Created with the first surface, once the output format is known.
-    renderer: Option<(egui_wgpu::Renderer, wgpu::TextureFormat)>,
-}
-
-impl Gpu {
-    fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .context("no Vulkan GPU found")?;
-        log::info!("rendering with {}", adapter.get_info().name);
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("dayz-map"),
-                ..Default::default()
-            }))?;
-        Ok(Self {
-            instance,
-            adapter,
-            device,
-            queue,
-            renderer: None,
-        })
-    }
 }
 
 struct Overlay {
@@ -238,8 +205,7 @@ struct Host {
     needs_redraw: bool,
     next_repaint: Option<Instant>,
     last_hide: Instant,
-    shown_at: Instant,
-    fade_in: Option<Duration>,
+    fade: Fade,
     /// Where the game window was last seen, to open the overlay on its monitor.
     game_center: Option<(i32, i32)>,
     exit: bool,
@@ -316,7 +282,7 @@ impl Host {
             configured: false,
             frame_pending: false,
         });
-        self.shown_at = Instant::now();
+        self.fade.restart();
         self.app.on_show();
         log::info!("overlay shown");
     }
@@ -347,31 +313,8 @@ impl Host {
         self.keyboard_focus = false;
         self.last_hide = Instant::now();
         self.app.on_hide();
-        self.release_textures();
+        self.gpu.release_textures(&self.egui_ctx);
         log::info!("overlay hidden");
-    }
-
-    /// Runs an empty egui pass so textures the app dropped are freed on the GPU now, rather
-    /// than the next time the overlay opens.
-    fn release_textures(&mut self) {
-        let Gpu {
-            device,
-            queue,
-            renderer,
-            ..
-        } = &mut self.gpu;
-        let Some((renderer, _)) = renderer.as_mut() else {
-            return;
-        };
-        let output = self.egui_ctx.run_ui(egui::RawInput::default(), |_| {});
-        for (id, deltas) in &output.textures_delta.set {
-            for delta in deltas {
-                renderer.update_texture(device, queue, *id, delta);
-            }
-        }
-        for id in &output.textures_delta.free {
-            renderer.free_texture(id);
-        }
     }
 
     fn configure_surface(&mut self) {
@@ -403,53 +346,11 @@ impl Host {
                 }
             }
         }
-        let surface = overlay.surface.as_ref().unwrap();
-        let caps = surface.get_capabilities(&gpu.adapter);
-        let format = match &gpu.renderer {
-            Some((_, format)) => *format,
-            None => {
-                let format = egui_wgpu::preferred_framebuffer_format(&caps.formats)
-                    .unwrap_or(caps.formats[0]);
-                let renderer = egui_wgpu::Renderer::new(
-                    &gpu.device,
-                    format,
-                    egui_wgpu::RendererOptions::default(),
-                );
-                gpu.renderer = Some((renderer, format));
-                format
-            }
-        };
-        let alpha_mode = if caps
-            .alpha_modes
-            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-        {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else {
-            log::warn!(
-                "the GPU surface can't be transparent here ({:?})",
-                caps.alpha_modes
-            );
-            caps.alpha_modes[0]
-        };
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
         let scale = overlay.scale.max(1) as u32;
-        surface.configure(
-            &gpu.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                color_space: Default::default(),
-                width: overlay.width.max(1) * scale,
-                height: overlay.height.max(1) * scale,
-                present_mode,
-                desired_maximum_frame_latency: 2,
-                alpha_mode,
-                view_formats: vec![],
-            },
+        gpu.configure(
+            overlay.surface.as_ref().unwrap(),
+            overlay.width * scale,
+            overlay.height * scale,
         );
         overlay.layer.wl_surface().set_buffer_scale(overlay.scale);
         overlay.configured = true;
@@ -466,15 +367,6 @@ impl Host {
         let Some(surface) = overlay.surface.as_ref() else {
             return;
         };
-        let Gpu {
-            device,
-            queue,
-            renderer,
-            ..
-        } = &mut self.gpu;
-        let Some((renderer, _)) = renderer.as_mut() else {
-            return;
-        };
         self.needs_redraw = false;
 
         let pixels_per_point = overlay.scale as f32;
@@ -486,7 +378,7 @@ impl Host {
             time: Some(self.start.elapsed().as_secs_f64()),
             events: std::mem::take(&mut self.events),
             focused: self.keyboard_focus,
-            max_texture_side: Some(device.limits().max_texture_dimension_2d as usize),
+            max_texture_side: Some(self.gpu.device.limits().max_texture_dimension_2d as usize),
             ..Default::default()
         };
         raw.viewports
@@ -497,13 +389,12 @@ impl Host {
         let app = &mut self.app;
         let output = self.egui_ctx.run_ui(raw, |ui| app.ui(ui));
 
-        if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
-            if viewport.repaint_delay.is_zero() {
-                self.needs_redraw = true;
-            } else if viewport.repaint_delay < Duration::from_secs(3600) {
-                let at = Instant::now() + viewport.repaint_delay;
+        match repaint_after(&output) {
+            Some(None) => self.needs_redraw = true,
+            Some(Some(at)) => {
                 self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
             }
+            None => {}
         }
         let cursor = cursor_icon(output.platform_output.cursor_icon);
         if cursor != self.cursor {
@@ -513,87 +404,24 @@ impl Host {
             }
         }
 
-        let mut primitives = self
-            .egui_ctx
-            .tessellate(output.shapes, output.pixels_per_point);
-        if let Some(fade) = self.fade_in {
-            // Colours are premultiplied, so scaling every channel fades the whole frame.
-            let t = self.shown_at.elapsed().as_secs_f32() / fade.as_secs_f32();
-            if t < 1.0 {
-                for primitive in &mut primitives {
-                    if let egui::epaint::Primitive::Mesh(mesh) = &mut primitive.primitive {
-                        for vertex in &mut mesh.vertices {
-                            vertex.color = vertex.color.linear_multiply(t);
-                        }
-                    }
-                }
-                self.needs_redraw = true;
-            }
-        }
-        for (id, deltas) in &output.textures_delta.set {
-            for delta in deltas {
-                renderer.update_texture(device, queue, *id, delta);
-            }
-        }
-        let frame = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            other => {
-                log::debug!(
-                    "skipping frame: {}",
-                    match other {
-                        wgpu::CurrentSurfaceTexture::Timeout => "timeout",
-                        wgpu::CurrentSurfaceTexture::Occluded => "occluded",
-                        _ => "surface outdated",
-                    }
-                );
-                self.needs_redraw = true;
-                if !matches!(
-                    other,
-                    wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded
-                ) {
-                    self.configure_surface();
-                }
-                return;
-            }
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [frame.texture.width(), frame.texture.height()],
-            pixels_per_point,
-        };
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let mut commands =
-            renderer.update_buffers(device, queue, &mut encoder, &primitives, &screen);
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("overlay"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                })
-                .forget_lifetime();
-            renderer.render(&mut pass, &primitives, &screen);
-        }
-        commands.push(encoder.finish());
-        queue.submit(commands);
-        // Ask for a frame callback in the same commit as this frame, to pace redraws.
+        let (opacity, fading) = self.fade.opacity();
+        let qh = &self.qh;
+        let frame_pending = &mut overlay.frame_pending;
         let wl_surface = overlay.layer.wl_surface();
-        wl_surface.frame(&self.qh, FrameCallbackData(wl_surface.clone()));
-        overlay.frame_pending = true;
-        queue.present(frame);
-        for id in &output.textures_delta.free {
-            renderer.free_texture(id);
+        let frame = self
+            .gpu
+            .paint(surface, &self.egui_ctx, output, opacity, || {
+                // Ask for a frame callback in the same commit as this frame, to pace redraws.
+                wl_surface.frame(qh, FrameCallbackData(wl_surface.clone()));
+                *frame_pending = true;
+            });
+        match frame {
+            Frame::Presented => self.needs_redraw |= fading,
+            Frame::Skipped => self.needs_redraw = true,
+            Frame::Outdated => {
+                self.needs_redraw = true;
+                self.configure_surface();
+            }
         }
 
         if self.app.take_close_request() {

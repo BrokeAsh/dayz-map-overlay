@@ -5,12 +5,20 @@ It switches to the map of the server you're on by itself, building that map from
 own files (or the server's Workshop mods) the first time, and marks points of interest:
 towns, water pumps, fuel, loot buildings by type, heli crash sites, vehicle spawns, and more.
 
-It's written in Rust and currently targets Linux desktops that support layer-shell overlays
-(KDE Plasma 6, Sway, Hyprland), with DayZ running through Steam/Proton. It never touches the
-game process: it reads the game's files and logs, draws its own window above the game, and
-listens for the hotkey the way any X11 app can, so BattlEye has nothing to see.
+It's written in Rust and runs on Windows 10 and 11, and on Linux desktops that support
+layer-shell overlays (KDE Plasma 6, Sway, Hyprland) with DayZ running through Steam/Proton. It
+never touches the game process: it reads the game's files and logs, draws its own window above
+the game, and listens for the hotkey like any other desktop app, so BattlEye has nothing to see.
 
 ## Requirements
+
+Windows:
+
+- Windows 10 or 11 with DirectX 12.
+- DayZ in **borderless** or **windowed** mode. Nothing can draw over exclusive fullscreen.
+- DayZ through Steam. It's found through Steam's library list, so there's usually nothing to set.
+
+Linux:
 
 - Linux with a Wayland desktop that supports layer-shell overlays: KDE Plasma 6, Sway,
   Hyprland, and other wlroots desktops. GNOME and X11 sessions aren't supported yet.
@@ -19,6 +27,24 @@ listens for the hotkey the way any X11 app can, so BattlEye has nothing to see.
   library drives and the Flatpak and Snap versions of Steam, so there's usually nothing to set.
 
 ## Install
+
+### Windows
+
+Download `dayz-map-<version>-windows-x86_64.zip` from the
+[releases](https://github.com/BrokeAsh/dayz-map-overlay/releases) and extract it somewhere it can
+stay, such as `%LOCALAPPDATA%\Programs\dayz-map`. Then, in a terminal in that folder:
+
+```powershell
+.\dayz-map status          # check that it found DayZ, the Workshop folder and the logs
+.\dayz-map autostart on    # start when you sign in (`off` to undo)
+.\dayz-map                 # or start it now (double-clicking dayz-map.exe works too)
+```
+
+The overlay runs without a window of its own; `dayz-map quit` stops it. Its log is
+`%APPDATA%\dayz-map-overlay\data\dayz-map.log`. The program isn't signed yet, so SmartScreen may
+warn the first time you run it.
+
+### Linux
 
 Download `dayz-map-<version>-linux-x86_64.tar.gz` from the
 [releases](https://github.com/BrokeAsh/dayz-map-overlay/releases), then:
@@ -51,14 +77,14 @@ game's cursor is free over it:
 | Reset view | **Fit** |
 | Points of interest | **Layers** |
 | Other maps | **Maps…** (the overlay switches back when you join a server) |
-| Close | **M**, the **✕** button, or switching away from the game |
+| Close | **M**, the **×** button, or switching away from the game |
 
 The toolbar shows the map, the server's name, and sliders for map opacity and how much the
 game is dimmed. Hover a marker for its name. The cursor's in-game coordinates (X east, Z north,
 in metres) show in the bottom-left corner; grid squares count from the north-west corner.
 
 The overlay opens on the monitor the game is on. DayZ must be the focused window, and it works
-best in borderless or windowed mode. If DayZ binds its own action to M, rebind that action in
+best in borderless or windowed mode (on Windows, it only works in those). If DayZ binds its own action to M, rebind that action in
 the game or change `hotkey`.
 
 Other commands:
@@ -66,7 +92,7 @@ Other commands:
 - `dayz-map toggle | show | hide | quit` control the running overlay.
 - `dayz-map status` shows the folders it found (and how), and what the game is doing: running,
   map, server, and mods.
-- `dayz-map autostart on | off` starts the overlay when you log in, or stops doing that.
+- `dayz-map autostart on | off` starts the overlay when you sign in, or stops doing that.
 - `dayz-map list` shows installed maps and every terrain found in the game and Workshop folders.
 - `dayz-map import <world>…` or `--all` builds maps ahead of time.
 
@@ -85,7 +111,8 @@ that uses them. A terrain is assembled from:
 The world id is the `CfgWorlds` class name, which is what the game reports when it joins a
 server. When several mods ship the same terrain (an official and an experimental build, say),
 the one the server loads wins. A map is rebuilt when its mod updates. Maps are stored in
-`~/.local/share/dayz-map-overlay/maps/<world>/`, about 40–80 MB and one or two seconds each.
+`~/.local/share/dayz-map-overlay/maps/<world>/` (on Windows,
+`%APPDATA%\dayz-map-overlay\data\maps\<world>\`), about 40–80 MB and one or two seconds each.
 
 For a terrain whose files can't be read, import a picture of the whole map, north up:
 
@@ -112,7 +139,8 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 
 ## Settings
 
-`~/.config/dayz-map-overlay/config.toml` is written when the overlay closes:
+`~/.config/dayz-map-overlay/config.toml` (on Windows,
+`%APPDATA%\dayz-map-overlay\config\config.toml`) is written when the overlay closes:
 
 ```toml
 hotkey = "m"                                  # a character, f1–f24, or a keysym like 0x6d
@@ -138,7 +166,11 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 
 ## Troubleshooting
 
-- **M does nothing:** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
+- **M does nothing (Windows):** check that DayZ is in borderless or windowed mode, then look in
+  `dayz-map.log` (see [Install](#windows)). It logs `hotkey in "…": toggling the map` for every
+  press while the overlay runs; `…: not the game` means `window_match` doesn't match the game's
+  window (the text in quotes is what to match).
+- **M does nothing (Linux):** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
   `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
   it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a
   workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings.
@@ -149,7 +181,8 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 
 ## How it works
 
-- **Which map** (`src/game.rs`): DayZ writes `script_<date>.log` in its Proton prefix. Each
+- **Which map** (`src/game.rs`): DayZ writes `script_<date>.log` in `%LOCALAPPDATA%\DayZ` (on
+  Linux, inside its Proton prefix). Each
   mission start logs `Creating Mission: mpmissions\__cur_mp.<world>\mission.c`; `intro.<world>`
   is the main menu. The RPT log's command line has the launcher's `-connect=ip:port:query` and
   `-mod=` list. A Steam server query (A2S_INFO) fetches the server name, kept only if the server
@@ -157,12 +190,18 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 - **Library** (`src/library.rs`, `src/import/catalog.rs`): scans the game and Workshop folders
   (archive headers only, about half a second for hundreds of mods), imports the map the game is
   on if it's missing or out of date, and rebuilds maps made by older versions.
-- **Overlay window** (`src/host/wayland.rs`): a full-screen `wlr-layer-shell` surface on the
+- **Overlay window on Linux** (`src/host/wayland.rs`): a full-screen `wlr-layer-shell` surface on the
   `overlay` layer, which compositors draw above fullscreen windows, placed on the monitor with
   the game window. It never takes keyboard focus, so the game stays the active window and
   keeps running; clicks on it don't activate it either. Its namespace is `on-screen-display`,
-  which KWin treats like the volume OSD: it fades in and out rather than animating like a window. Rendering is egui on wgpu (Vulkan).
-- **Hotkey** (`src/trigger/`): Proton games draw through XWayland, which only receives keyboard
+  which KWin treats like the volume OSD: it fades in and out rather than animating like a window.
+  Rendering is egui on wgpu (Vulkan).
+- **Windows** (`src/host/windows.rs`): a topmost, non-activating tool window
+  (`WS_EX_NOACTIVATE`) covering the game's monitor, drawn with DirectX 12 through DirectComposition
+  so it can be see-through. Clicks never activate it, so DayZ stays the foreground window. The
+  hotkey comes from raw keyboard input, which Windows delivers to background windows without a
+  hook, and the overlay hides when another window comes to the front.
+- **Hotkey on Linux** (`src/trigger/`): Proton games draw through XWayland, which only receives keyboard
   input while one of its windows is focused. The app listens for raw XInput2 key events from
   XWayland and checks the focused window against `window_match`: no key grab, no root access, and
   no false triggers while typing in other apps. Because the game keeps focus, the same listener
@@ -176,7 +215,7 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 ## Not done yet
 
 - Server-specific loot and events (servers don't share their economy files).
-- Windows and X11-only desktops (the UI and importer are portable; they need a window host).
+- X11-only Linux desktops (the UI and importer are portable; they need a window host).
 - GNOME, which doesn't support layer-shell.
 
 ## License

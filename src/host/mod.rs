@@ -1,8 +1,12 @@
 //! Platform windowing for the overlay.
 
+mod gpu;
+#[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(windows)]
+mod windows;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::config::Config;
 
@@ -11,8 +15,10 @@ use crate::config::Config;
 pub enum HostEvent {
     Command(crate::ipc::Command),
     /// The hotkey was pressed in the game, whose window is centred at this point.
+    #[cfg(target_os = "linux")]
     Hotkey(Option<(i32, i32)>),
     /// Another window took focus from the game.
+    #[cfg(target_os = "linux")]
     GameUnfocused,
     /// The game started, stopped, or changed map.
     Session(crate::game::Session),
@@ -20,11 +26,17 @@ pub enum HostEvent {
     Repaint(std::time::Duration),
 }
 
+#[cfg(target_os = "linux")]
 pub fn run(config: Config, show: bool) -> Result<()> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        bail!(
+        anyhow::bail!(
             "this build only supports Wayland desktops with layer-shell (KDE Plasma, Sway, Hyprland)"
         );
     }
     wayland::run(config, show)
+}
+
+#[cfg(windows)]
+pub fn run(config: Config, show: bool) -> Result<()> {
+    windows::run(config, show)
 }
