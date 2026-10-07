@@ -1,0 +1,140 @@
+//! Installed map packs.
+//!
+//! Each map lives in `<data dir>/maps/<id>/` with a `map.toml` and one tile pyramid per layer:
+//! `<layer>/<level>/<x>_<y>.<ext>`. Level `max_level` is full resolution with `grid` tiles per
+//! side; each level below halves the resolution. Tile `y = 0` is the north edge.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapMeta {
+    pub id: String,
+    pub name: String,
+    /// Terrain size in metres; DayZ coordinates run from 0 to this on both axes.
+    pub world_size: f64,
+    /// Importer version that built this pack (0 for picture imports).
+    #[serde(default)]
+    pub format: u32,
+    /// Fingerprint of the game files it was built from, to notice mod updates.
+    #[serde(default)]
+    pub source: String,
+    /// Workshop item it came from, if any.
+    #[serde(default)]
+    pub mod_id: Option<String>,
+    /// Fingerprint of what the points of interest were built from; they're rebuilt on their own
+    /// when it changes, without redoing the tiles.
+    #[serde(default)]
+    pub pois_source: String,
+    #[serde(default)]
+    pub layers: Vec<LayerMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerMeta {
+    pub id: String,
+    pub name: String,
+    pub tile_px: u32,
+    /// Tiles per side at full resolution.
+    pub grid: u32,
+    pub max_level: u32,
+    pub ext: String,
+    /// Metres covered by one full-resolution tile.
+    pub tile_m: f64,
+    /// World position (x, z) of the grid's north-west corner.
+    pub origin: [f64; 2],
+}
+
+impl LayerMeta {
+    /// Tiles per side at `level`.
+    pub fn grid_at(&self, level: u32) -> u32 {
+        self.grid.div_ceil(1 << (self.max_level - level))
+    }
+
+    /// Metres covered by one tile side at `level`.
+    pub fn tile_metres(&self, level: u32) -> f64 {
+        self.tile_m * f64::from(1u32 << (self.max_level - level))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MapPack {
+    pub meta: MapMeta,
+    pub dir: PathBuf,
+}
+
+impl MapPack {
+    pub fn pois(&self) -> crate::import::poi::Pois {
+        std::fs::read(self.dir.join("pois.json"))
+            .ok()
+            .and_then(|d| serde_json::from_slice(&d).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn tile_path(&self, layer: &LayerMeta, level: u32, x: u32, y: u32) -> PathBuf {
+        self.dir
+            .join(&layer.id)
+            .join(level.to_string())
+            .join(format!("{x}_{y}.{}", layer.ext))
+    }
+}
+
+pub fn maps_dir() -> PathBuf {
+    crate::config::data_dir().join("maps")
+}
+
+pub fn load_all() -> Vec<MapPack> {
+    let mut packs: Vec<MapPack> = std::fs::read_dir(maps_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| match load(&entry.path()) {
+            Ok(pack) if !pack.meta.layers.is_empty() => Some(pack),
+            Ok(_) => None,
+            Err(e) => {
+                log::debug!("skipping {}: {e:#}", entry.path().display());
+                None
+            }
+        })
+        .collect();
+    packs.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
+    packs
+}
+
+pub fn load(dir: &Path) -> Result<MapPack> {
+    let path = dir.join("map.toml");
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let meta = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(MapPack {
+        meta,
+        dir: dir.to_owned(),
+    })
+}
+
+pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join("map.toml.tmp");
+    std::fs::write(&tmp, toml::to_string_pretty(meta)?)?;
+    std::fs::rename(tmp, dir.join("map.toml"))?;
+    Ok(())
+}
+
+/// Friendly names for the official maps; modded maps fall back to their world name.
+pub fn display_name(world: &str) -> String {
+    match world {
+        "chernarusplus" => "Chernarus+".into(),
+        "enoch" => "Livonia".into(),
+        "sakhal" => "Sakhal".into(),
+        "deerisle" => "Deer Isle".into(),
+        "takistanplus" => "Takistan+".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}

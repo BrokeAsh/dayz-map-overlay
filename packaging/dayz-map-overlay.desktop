@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DayZ Map Overlay
+Comment=Press M in DayZ to open a see-through map
+Exec=dayz-map run
+Icon=map-flat
+Terminal=false
+NoDisplay=true
+X-KDE-autostart-phase=2
