@@ -178,3 +178,12 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 - Server-specific loot and events (servers don't share their economy files).
 - Windows and X11-only desktops (the UI and importer are portable; they need a window host).
 - GNOME, which doesn't support layer-shell.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your
+option.
+
+Maps and points of interest are built on your machine from the game files and mods you
+installed; no map data ships with this program. DayZ is a trademark of Bohemia Interactive,
+which isn't affiliated with this project.

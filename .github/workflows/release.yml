@@ -21,11 +21,20 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev pkg-config
       - run: cargo test --release
       - run: cargo build --release
+      - name: Check the binary
+        run: |
+          test "v$(./target/release/dayz-map --version | cut -d' ' -f2)" = "$GITHUB_REF_NAME"
+          ./target/release/dayz-map status
+      - name: Release notes
+        run: |
+          # This version's section of CHANGELOG.md.
+          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          test -s notes.md
       - name: Package
         run: |
           name="dayz-map-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir "$name"
-          cp target/release/dayz-map README.md "$name/"
+          cp target/release/dayz-map README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - name: Publish
@@ -33,4 +42,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dayz-map-*.tar.gz dayz-map-*.tar.gz.sha256 \
-            --title "$GITHUB_REF_NAME" --generate-notes
+            --title "$GITHUB_REF_NAME" --notes-file notes.md

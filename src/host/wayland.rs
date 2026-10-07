@@ -132,6 +132,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         needs_redraw: false,
         next_repaint: None,
         last_hide: Instant::now() - REOPEN_GRACE,
+        shown_at: Instant::now(),
+        fade_in: own_fade(),
         game_center: None,
         exit: false,
     };
@@ -205,6 +207,13 @@ struct Overlay {
     frame_pending: bool,
 }
 
+/// KWin fades on-screen displays in itself (see `show`); elsewhere the overlay fades itself in.
+fn own_fade() -> Option<Duration> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let kde = desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE"));
+    (!kde).then_some(Duration::from_millis(150))
+}
+
 struct Host {
     conn: Connection,
     qh: QueueHandle<Host>,
@@ -229,6 +238,8 @@ struct Host {
     needs_redraw: bool,
     next_repaint: Option<Instant>,
     last_hide: Instant,
+    shown_at: Instant,
+    fade_in: Option<Duration>,
     /// Where the game window was last seen, to open the overlay on its monitor.
     game_center: Option<(i32, i32)>,
     exit: bool,
@@ -305,6 +316,7 @@ impl Host {
             configured: false,
             frame_pending: false,
         });
+        self.shown_at = Instant::now();
         self.app.on_show();
         log::info!("overlay shown");
     }
@@ -501,9 +513,23 @@ impl Host {
             }
         }
 
-        let primitives = self
+        let mut primitives = self
             .egui_ctx
             .tessellate(output.shapes, output.pixels_per_point);
+        if let Some(fade) = self.fade_in {
+            // Colours are premultiplied, so scaling every channel fades the whole frame.
+            let t = self.shown_at.elapsed().as_secs_f32() / fade.as_secs_f32();
+            if t < 1.0 {
+                for primitive in &mut primitives {
+                    if let egui::epaint::Primitive::Mesh(mesh) = &mut primitive.primitive {
+                        for vertex in &mut mesh.vertices {
+                            vertex.color = vertex.color.linear_multiply(t);
+                        }
+                    }
+                }
+                self.needs_redraw = true;
+            }
+        }
         for (id, deltas) in &output.textures_delta.set {
             for delta in deltas {
                 renderer.update_texture(device, queue, *id, delta);
