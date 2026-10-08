@@ -116,7 +116,8 @@ the one the server loads wins. A map is rebuilt when its mod updates. Maps are s
 `~/.local/share/dayz-map-overlay/maps/<world>/` (on Windows,
 `%APPDATA%\dayz-map-overlay\data\maps\<world>\`), about 40–80 MB and one or two seconds each.
 
-For a terrain whose files can't be read, import a picture of the whole map, north up:
+For a terrain whose files can't be read, import a picture of the whole map, north up (at most
+16384 px across):
 
 ```sh
 dayz-map import-image mymap mymap.png --world-size 12800 --name "My Map"

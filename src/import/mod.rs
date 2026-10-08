@@ -20,7 +20,7 @@ use image::{RgbaImage, imageops};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::maps::{self, LayerMeta, MapMeta, MapPack};
 pub use catalog::{Catalog, TileSource, WorldSource};
@@ -37,51 +37,36 @@ pub struct Progress {
 }
 
 /// Keeps two imports of one map (the overlay's and `dayz-map import`, say) from working in the
-/// same folder at once. Removed when dropped.
-struct ImportLock(std::path::PathBuf);
+/// same folder at once. A lock the system holds on `import.lock`, so it goes away however the
+/// process ends.
+struct ImportLock(#[allow(dead_code)] std::fs::File);
 
 impl ImportLock {
-    /// Older than this, a lock is left from a crash (imports take seconds to a minute or two).
-    const STALE: std::time::Duration = std::time::Duration::from_secs(600);
-
-    /// Takes the map's lock, waiting for another import of it (the overlay and the command
-    /// line, say) to finish. Also says whether it waited, in which case the map may now be
-    /// up to date.
+    /// Takes the map's lock, waiting for another import of it to finish. Also says whether it
+    /// waited, in which case the map may now be up to date.
     fn take(map_dir: &Path) -> Result<(Self, bool)> {
         std::fs::create_dir_all(map_dir)?;
         let path = map_dir.join("import.lock");
-        let mut waited = false;
-        let mut cleared = false;
-        loop {
-            match std::fs::File::create_new(&path) {
-                Ok(_) => return Ok((Self(path), waited)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let age = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok());
-                    if age.is_some_and(|age| age < Self::STALE) {
-                        if !waited {
-                            log::info!("waiting for another import of {}", map_dir.display());
-                        }
-                        waited = true;
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                    } else if cleared {
-                        bail!("couldn't lock {}", path.display());
-                    } else {
-                        cleared = true;
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-                Err(e) => return Err(e.into()),
+        // (Never deleted: a process waiting on the old file would lock it while another
+        // creates and locks a new one.)
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok((Self(file), false)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                log::info!("waiting for another import of {}", map_dir.display());
+                file.lock()
+                    .with_context(|| format!("locking {}", path.display()))?;
+                Ok((Self(file), true))
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking {}", path.display()))
             }
         }
-    }
-}
-
-impl Drop for ImportLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -110,10 +95,12 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     {
         return Ok(pack);
     }
-    // Points of interest first: they don't depend on the tiles, and the tiles replace the old
-    // ones as soon as they're built.
-    write_pois(source, &dir)?;
+    // Points of interest first, so a game file that can't be read stops the import before the
+    // old tiles go; but saved only with the new tiles, so a failed import leaves the old map
+    // whole.
+    let pois = pois_json(source)?;
     let layer = build_layer(tiles, &layout, &dir, progress)?;
+    write_pois(&dir, &pois)?;
 
     let meta = MapMeta {
         id: source.id.clone(),
@@ -140,7 +127,7 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     // Another import may have rewritten it since it was loaded.
     let mut meta = maps::load(&pack.dir)?.meta;
     if meta.pois_source != source.pois_fingerprint() {
-        write_pois(source, &pack.dir)?;
+        write_pois(&pack.dir, &pois_json(source)?)?;
     }
     meta.pois_source = source.pois_fingerprint();
     maps::save_meta(&pack.dir, &meta)?;
@@ -148,7 +135,13 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     Ok(())
 }
 
-fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
+/// Written whole, then swapped in, so the overlay never reads half a file.
+fn write_pois(dir: &Path, json: &[u8]) -> Result<()> {
+    maps::write_atomic(&dir.join("pois.json"), json)
+}
+
+/// The world's points of interest, as `pois.json` holds them.
+fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
     let (mut markers, zones) = source
         .economy
         .as_ref()
@@ -191,9 +184,7 @@ fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
         pois.markers.len(),
         pois.zones.len()
     );
-    // Written whole, then swapped in, so the overlay never reads half a file.
-    maps::write_atomic(&dir.join("pois.json"), &serde_json::to_vec(&pois)?)?;
-    Ok(())
+    Ok(serde_json::to_vec(&pois)?)
 }
 
 /// The terrain's wells and fresh water. A world file that can't be read right now is an error
@@ -297,6 +288,8 @@ fn build_layer(
     let split = max_level.min(2);
     let tasks: Vec<(u32, u32)> = grid_coords(meta.grid_at(split)).collect();
     let next = AtomicUsize::new(0);
+    // Set when a thread fails, so the others stop instead of building the rest of the map.
+    let failed = AtomicBool::new(false);
     let results = Mutex::new(HashMap::new());
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -305,8 +298,12 @@ fn build_layer(
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| -> Result<()> {
-                    while let Some(&(x, y)) = tasks.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let image = builder.build(split, x, y, None)?;
+                    while !failed.load(Ordering::Relaxed)
+                        && let Some(&(x, y)) = tasks.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let image = builder.build(split, x, y, None).inspect_err(|_| {
+                            failed.store(true, Ordering::Relaxed);
+                        })?;
                         results.lock().unwrap().insert((x, y), image);
                     }
                     Ok(())
@@ -497,6 +494,15 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         anyhow::bail!("the id must be lower-case letters, digits, `_` or `-`, such as `mymap`");
     }
     maps::check_world_size(world_size)?;
+    // Squared up and held whole while cutting: 16384 px across is already 1 GB.
+    const MAX_SIDE: u32 = 16384;
+    let (w, h) = image::ImageReader::open(picture)?
+        .with_guessed_format()?
+        .into_dimensions()
+        .with_context(|| format!("reading {}", picture.display()))?;
+    if w.max(h) > MAX_SIDE {
+        bail!("the picture is {w}x{h} px; scale it down to at most {MAX_SIDE} px across");
+    }
     let mut reader = image::ImageReader::open(picture)?.with_guessed_format()?;
     reader.no_limits();
     let image = reader

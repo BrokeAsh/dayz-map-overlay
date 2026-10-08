@@ -152,7 +152,14 @@ impl Listener {
         loop {
             let event = match conn.wait_for_event() {
                 Ok(event) => event,
-                Err(e) => return e.into(),
+                Err(e) => {
+                    // The game went down with XWayland (Wine can take it with it): don't leave
+                    // the map open over the desktop.
+                    if game_focused {
+                        on_unfocus();
+                    }
+                    return e.into();
+                }
             };
             match event {
                 // A master device repeats its slave's event; count each press once.

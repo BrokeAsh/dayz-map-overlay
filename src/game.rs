@@ -157,7 +157,13 @@ impl Watcher {
         }
         // A long modded session's log can be hundreds of MB: start at its latest mission.
         if self.offset == 0 && len > LOG_TAIL {
-            self.offset = latest_mission(&mut file, len);
+            let left_server;
+            (self.offset, left_server) = latest_mission(&mut file, len);
+            // The lines skipped held a trip back to the main menu (see `poll`).
+            if left_server {
+                self.session.server = None;
+                self.query_port = None;
+            }
         }
         if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
             return Vec::new();
@@ -224,30 +230,56 @@ impl Watcher {
     }
 }
 
-/// Where to start reading an existing script log: the line with its latest mission (searching
-/// backward a chunk at a time, so memory stays bounded), or the end if there's none.
-fn latest_mission(file: &mut std::fs::File, len: u64) -> u64 {
+/// Where to start reading an existing script log: the line with its latest mission, or the end
+/// if there's none. Also whether the player went from a server back to the main menu earlier
+/// in it. Searches backward a chunk at a time, so memory stays bounded.
+fn latest_mission(file: &mut std::fs::File, len: u64) -> (u64, bool) {
     const MARK: &[u8] = b"Creating Mission:";
+    let mut latest = None;
+    let mut menu_after = false;
+    // Marks from here on are done (the chunks overlap).
+    let mut limit = len;
     let mut end = len;
     loop {
         let start = end.saturating_sub(LOG_TAIL);
         let mut chunk = vec![0; (end - start) as usize];
         if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut chunk).is_err() {
-            return len;
+            return (latest.unwrap_or(len), false);
         }
-        if let Some(at) = chunk.windows(MARK.len()).rposition(|w| w == MARK) {
+        let mut search = chunk.len().min((limit - start) as usize + MARK.len() - 1);
+        while let Some(at) = chunk[..search].windows(MARK.len()).rposition(|w| w == MARK) {
+            search = at + MARK.len() - 1;
+            limit = start + at as u64;
             // The start of that line (or of the chunk: the rest of the line still parses).
-            return chunk[..at]
+            let line_start = chunk[..at]
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map_or(start, |nl| start + nl as u64 + 1);
+            let latest = *latest.get_or_insert(line_start);
+            match line_at(file, line_start).and_then(|line| mission_world(&line)) {
+                Some(None) => menu_after = true,
+                Some(Some(_)) if menu_after => return (latest, true),
+                _ => {}
+            }
         }
         if start == 0 {
-            return len;
+            return (latest.unwrap_or(len), false);
         }
         // Overlap the chunks so a mark split between them is still found.
         end = start + MARK.len() as u64;
     }
+}
+
+/// The (short) line starting at `offset`.
+fn line_at(file: &mut std::fs::File, offset: u64) -> Option<String> {
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(1024).read_to_end(&mut bytes).ok()?;
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 /// `mpmissions\__cur_mp.deerisle\mission.c` -> `Some(Some("deerisle"))`; the main-menu intro
@@ -524,6 +556,30 @@ mod tests {
         }
         std::fs::remove_file(&path).unwrap();
         assert_eq!(world.as_deref(), Some("namalsk"));
+    }
+
+    #[test]
+    fn menu_trip_far_back_in_a_long_log() {
+        let path = std::env::temp_dir().join(format!("dzm-trip-{}.log", std::process::id()));
+        let mission = |m: &str| format!("SCRIPT : Creating Mission: mpmissions\\{m}\\mission.c\n");
+        let filler = "SCRIPT : something else happened\n".repeat(150_000); // ~5 MB
+        let (deer, intro, nam) = (
+            mission("__cur_mp.deerisle"),
+            mission("intro.chernarusplus"),
+            mission("__cur_mp.namalsk"),
+        );
+        let check = |text: String, trip: bool| {
+            std::fs::write(&path, &text).unwrap();
+            let mut file = std::fs::File::open(&path).unwrap();
+            let (offset, left) = latest_mission(&mut file, text.len() as u64);
+            assert_eq!(left, trip);
+            assert!(text[offset as usize..].starts_with(&nam));
+        };
+        // Joined, back to the menu, joined another server.
+        check(format!("{deer}{filler}{intro}{filler}{nam}{filler}"), true);
+        // The launcher's -connect: the menu first, then the server.
+        check(format!("{intro}{filler}{nam}{filler}"), false);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

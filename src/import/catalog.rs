@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::pbo::{Pbo, stamp};
+use super::pbo::Pbo;
 use super::poi::Place;
 use super::{poi, rap, wrp};
 use crate::maps;
@@ -102,9 +102,11 @@ impl WorldSource {
             IMPORT_VERSION.to_string(),
             self.satellite.pbo.path.display().to_string(),
         ];
-        parts.push(stamp(&self.satellite.pbo.path));
+        // The stamps from when the files were scanned, which the entries' offsets belong to:
+        // if a file changes during an import, the next scan sees it and imports again.
+        parts.push(self.satellite.pbo.opened.clone());
         if let Some(economy) = &self.economy {
-            parts.push(stamp(&economy.pbo.path));
+            parts.push(economy.pbo.opened.clone());
         }
         parts.join("|")
     }
@@ -121,7 +123,7 @@ impl WorldSource {
             .chain(&self.scripts)
         {
             parts.push(pbo.path.display().to_string());
-            parts.push(stamp(&pbo.path));
+            parts.push(pbo.opened.clone());
         }
         parts.join("|")
     }

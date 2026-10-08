@@ -279,12 +279,16 @@ impl Host {
         log::info!("overlay hidden");
     }
 
-    fn toggle(&mut self, follow_focus: bool) {
-        if self.visible {
-            self.hide();
-        } else {
-            self.show(follow_focus);
+    /// Opens for `dayz-map show` (a desktop shortcut, say) or after a restart. Over the game,
+    /// the map closes again when the user switches away from it, as with the hotkey.
+    fn show_by_command(&mut self) {
+        let game = win::foreground()
+            .filter(|front| !front.ours && self.matches_game(&front.description))
+            .map(|front| front.hwnd);
+        if game.is_some() {
+            self.game = game;
         }
+        self.show(game.is_some());
     }
 
     fn request_redraw(&self) {
@@ -421,23 +425,16 @@ impl ApplicationHandler<HostEvent> for Host {
             return;
         }
         if std::mem::take(&mut self.show_at_start) {
-            // Restarted with the map open over the game: the game is in front, and the map
-            // should close again when the user switches away from it.
-            let game = win::foreground()
-                .filter(|front| !front.ours && self.matches_game(&front.description))
-                .map(|front| front.hwnd);
-            if game.is_some() {
-                self.game = game;
-            }
-            self.show(game.is_some());
+            self.show_by_command();
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: HostEvent) {
         match event {
-            HostEvent::Command(Command::Show) => self.show(false),
+            HostEvent::Command(Command::Show) => self.show_by_command(),
             HostEvent::Command(Command::Hide) => self.hide(),
-            HostEvent::Command(Command::Toggle) => self.toggle(false),
+            HostEvent::Command(Command::Toggle) if self.visible => self.hide(),
+            HostEvent::Command(Command::Toggle) => self.show_by_command(),
             HostEvent::Command(Command::Quit) => {
                 self.hide();
                 event_loop.exit();
