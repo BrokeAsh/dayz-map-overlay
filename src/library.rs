@@ -86,10 +86,12 @@ struct Worker {
 impl Worker {
     fn run(self, rx: Receiver<Request>) {
         let mut upgraded = false;
+        // The game's map, while it isn't ready and up to date: a rescan tries it again.
+        let mut unsettled = None;
         for request in rx {
             // A bug tripped by some mod's files mustn't stop the library for the whole session.
             let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.handle(request, &mut upgraded)
+                self.handle(request, &mut upgraded, &mut unsettled)
             }));
             if handled.is_err() {
                 self.update(|s| {
@@ -101,7 +103,12 @@ impl Worker {
         }
     }
 
-    fn handle(&self, request: Request, upgraded: &mut bool) {
+    fn handle(
+        &self,
+        request: Request,
+        upgraded: &mut bool,
+        unsettled: &mut Option<(String, Vec<String>)>,
+    ) {
         match request {
             Request::Scan => {
                 self.scan();
@@ -109,8 +116,16 @@ impl Worker {
                     *upgraded = true;
                     self.upgrade_old_imports();
                 }
+                // Maybe newly downloaded, or readable again.
+                if let Some((world, mods)) = unsettled.take()
+                    && !self.ensure(&world, &mods)
+                {
+                    *unsettled = Some((world, mods));
+                }
             }
-            Request::Ensure { world, mods } => self.ensure(&world, &mods),
+            Request::Ensure { world, mods } => {
+                *unsettled = (!self.ensure(&world, &mods)).then_some((world, mods));
+            }
             Request::Import { id } => {
                 if let Some(source) = self.catalog().best(&id, &[]) {
                     self.import(&self.fresh(source, &[]), false);
@@ -127,7 +142,9 @@ impl Worker {
     fn scan(&self) -> Arc<Catalog> {
         self.update(|s| s.scanning = true);
         let start = std::time::Instant::now();
-        let catalog = Arc::new(catalog::scan(&catalog::roots(&paths::current())));
+        // Steam folders too: the Workshop folder appears with the first mod download.
+        let paths = paths::refresh(&crate::config::Config::load());
+        let catalog = Arc::new(catalog::scan(&catalog::roots(&paths)));
         log::info!(
             "found {} terrains in {:.1?}",
             catalog.unique().len(),
@@ -157,7 +174,9 @@ impl Worker {
         existing.unwrap_or_else(|| self.scan())
     }
 
-    fn ensure(&self, world: &str, mods: &[String]) {
+    /// Returns whether that settled it: the map is ready and up to date, or there's nothing
+    /// more to try (no files, but a picture is installed).
+    fn ensure(&self, world: &str, mods: &[String]) -> bool {
         let mut catalog = self.catalog();
         // A newly downloaded mod: maybe this map, or another copy of it that the server uses.
         if catalog.best(world, mods).is_none() || mods.iter().any(|m| !catalog.mods.contains(m)) {
@@ -175,31 +194,41 @@ impl Worker {
                     ));
                 }
             });
-            return;
+            return installed;
         };
         match maps::load(&maps::maps_dir().join(&source.id)) {
             Ok(mut pack) if source.is_current(&pack) => {
-                self.refresh_pois(&source, &mut pack);
+                let refreshed = self.refresh_pois(&source, &mut pack);
                 self.update(|s| s.ready = Some(source.id.clone()));
+                refreshed
             }
             installed => {
+                let imported = self.import(&source, true);
                 // An installed picture still works if the terrain's own files don't.
-                if !self.import(&source, true) && installed.is_ok() {
+                if !imported && installed.is_ok() {
                     self.update(|s| s.ready = Some(source.id.clone()));
                 }
+                imported
             }
         }
     }
 
-    /// Rebuilds the points of interest if what they come from (or how) has changed.
-    fn refresh_pois(&self, source: &WorldSource, pack: &mut maps::MapPack) {
+    /// Rebuilds the points of interest if what they come from (or how) has changed; returns
+    /// whether they're up to date.
+    fn refresh_pois(&self, source: &WorldSource, pack: &mut maps::MapPack) -> bool {
         if pack.meta.pois_source == source.pois_fingerprint() {
-            return;
+            return true;
         }
         log::info!("updating the points of interest of {}", pack.meta.name);
         match import::refresh_pois(source, pack) {
-            Ok(()) => self.update(|s| s.generation += 1),
-            Err(e) => log::warn!("{}: {e:#}", pack.meta.name),
+            Ok(()) => {
+                self.update(|s| s.generation += 1);
+                true
+            }
+            Err(e) => {
+                log::warn!("{}: {e:#}", pack.meta.name);
+                false
+            }
         }
     }
 

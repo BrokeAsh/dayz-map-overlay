@@ -7,6 +7,26 @@
   the logs from `%LOCALAPPDATA%\DayZ`, and `dayz-map autostart on` starts it at sign-in.
 - `dayz-map status | head` and similar no longer print a broken-pipe error on Linux.
 - Config files saved with a byte-order mark (as Windows PowerShell does) load correctly.
+- On Linux, the default `window_match` now matches the game's window class (`steam_app_221100`
+  under Proton, `dayz_x64.exe` under Wine) instead of any window titled "DayZ", so a browser
+  tab about DayZ no longer opens the map. A config that saved the old default is updated.
+- The map opens on the game's monitor with scaled XWayland too, and the hotkey keeps working
+  when XWayland restarts or starts after the overlay.
+- Only one overlay runs, even when two start at once; a failed or interrupted import, or a disk
+  filling up mid-import, leaves the previous map intact; two imports of one map (the overlay
+  and `dayz-map import`) wait for each other.
+- Mod and server detection: quoted launch options and absolute or `!Workshop` mod paths are
+  read correctly; logs from before the game started are ignored; the current map is found in
+  very long logs; the server name is dropped after switching servers through the main menu.
+- Rescan finds a newly created Workshop folder and retries a map that failed to build.
+- Wells are found when a mod declares them across several script files, and markers placed off
+  the map are dropped.
+- Hardened the game-file readers against damaged or crafted mods (bounded memory, no panics),
+  and replaced the LZO dependency with a checked decoder.
+- The overlay restarts itself if the graphics device is lost, and closes when you switch away
+  from the game however it was opened.
+- `import-image` refuses pictures over 16384 px across.
+- Building needs Rust 1.89 or newer.
 
 ## 0.1.0
 
