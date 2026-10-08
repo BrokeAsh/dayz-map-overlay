@@ -108,21 +108,24 @@ impl MapMeta {
             anyhow::bail!("bad map id {:?}", self.id);
         }
         check_world_size(self.world_size)?;
-        for layer in &self.layers {
-            let ok = valid_id(&layer.id)
-                && (1..=8192).contains(&layer.tile_px)
-                && (1..=4096).contains(&layer.grid)
-                && layer.max_level <= 16
-                && layer.grid <= 1 << layer.max_level
-                && layer.tile_m.is_finite()
-                && layer.tile_m > 0.0
-                && layer.origin.iter().all(|c| c.is_finite())
-                && layer.ext.bytes().all(|b| b.is_ascii_alphanumeric());
-            if !ok {
-                anyhow::bail!("bad layer {:?}", layer.id);
-            }
+        if let Some(layer) = self.layers.iter().find(|l| !l.is_valid()) {
+            anyhow::bail!("bad layer {:?}", layer.id);
         }
         Ok(())
+    }
+}
+
+impl LayerMeta {
+    fn is_valid(&self) -> bool {
+        valid_id(&self.id)
+            && (1..=8192).contains(&self.tile_px)
+            && (1..=4096).contains(&self.grid)
+            && self.max_level <= 16
+            && self.grid <= 1 << self.max_level
+            && self.tile_m.is_finite()
+            && self.tile_m > 0.0
+            && self.origin.iter().all(|c| c.is_finite())
+            && self.ext.bytes().all(|b| b.is_ascii_alphanumeric())
     }
 }
 
@@ -169,6 +172,10 @@ pub fn recorded_layers(dir: &Path) -> Vec<LayerMeta> {
         })
         .map(|meta| meta.layers)
         .unwrap_or_default()
+        .into_iter()
+        // A damaged one would make the new map.toml unsaveable too.
+        .filter(LayerMeta::is_valid)
+        .collect()
 }
 
 pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {

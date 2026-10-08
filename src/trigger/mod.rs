@@ -19,116 +19,184 @@ use crate::config::Config;
 /// XIAllDevices. XWayland reports raw events from the physical (slave) devices only.
 const ALL_DEVICES: u16 = 0;
 
+/// How often to try again while XWayland isn't there: not started yet when the overlay
+/// autostarts, or restarting after a crash (Wine can take it down).
+const RECONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Starts the listener thread; `on_press` runs for each hotkey press in a matching window, with
 /// the centre of that window in global screen coordinates (to open the overlay on its monitor).
-/// `on_unfocus` runs when focus moves from a matching window to anything else.
+/// `on_unfocus` runs when focus moves from a matching window to anything else. Fails only for a
+/// hotkey that can't be understood; without XWayland it keeps trying in the background.
 pub fn spawn(
     config: &Config,
     on_press: impl Fn(Option<(i32, i32)>) + Send + 'static,
     on_unfocus: impl Fn() + Send + 'static,
 ) -> Result<()> {
     let keysym = parse_keysym(&config.hotkey)?;
+    let name = config.hotkey.clone();
     let patterns: Vec<String> = config
         .window_match
         .iter()
         .map(|p| p.to_lowercase())
         .collect();
-    let (conn, screen) = RustConnection::connect(None).context("connecting to XWayland")?;
-    let root = conn.setup().roots[screen].root;
-    let version = conn
-        .xinput_xi_query_version(2, 2)?
-        .reply()
-        .context("XInput2 is not available")?;
-    log::debug!("XInput {}.{}", version.major_version, version.minor_version);
-
-    let keycodes = Keycodes::load(&conn)?;
-    let hotkey = keycodes.find(keysym);
-    log::debug!("hotkey keycodes {hotkey:?}");
-    if hotkey.is_empty() {
-        bail!("no key on the keyboard produces {:?}", config.hotkey);
-    }
-    // Ctrl, Alt and Super combinations are left alone; Shift is allowed (it's sprint in DayZ).
-    let blocking: Vec<u32> = [0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03]
-        .into_iter()
-        .flat_map(|k| keycodes.find(k))
-        .collect();
-    let blocking = modifier_mask(&conn, &blocking)?;
-
-    conn.xinput_xi_select_events(
-        root,
-        &[xinput::EventMask {
-            deviceid: ALL_DEVICES,
-            mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
-        }],
-    )?
-    .check()
-    .context("selecting XInput2 raw key events")?;
-    let atoms = Atoms::new(&conn)?;
-    conn.change_window_attributes(
-        root,
-        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    )?
-    .check()
-    .context("watching the focused window")?;
     let matches =
         move |window: &str| patterns.is_empty() || patterns.iter().any(|p| window.contains(p));
-
+    // The first try here, so a problem shows in the log before anything else happens.
+    let mut next = Listener::connect(keysym, &name);
     std::thread::Builder::new()
         .name("hotkey".into())
         .spawn(move || {
-            let mut game_focused = matches(&atoms.active_window(&conn, root).0);
+            let mut failing: Option<String> = None;
             loop {
-                let event = match conn.wait_for_event() {
-                    Ok(event) => event,
+                match next {
+                    Ok(listener) => {
+                        failing = None;
+                        log::info!("listening for the hotkey");
+                        let e = listener.listen(&matches, &on_press, &on_unfocus);
+                        log::warn!("lost the XWayland connection: {e:#}; reconnecting");
+                    }
                     Err(e) => {
-                        log::error!("lost the XWayland connection: {e}");
-                        return;
-                    }
-                };
-                match event {
-                    // A master device repeats its slave's event; count each press once.
-                    Event::XinputRawKeyPress(e) if e.deviceid == e.sourceid => {
-                        let repeat = e.flags.contains(xinput::KeyEventFlags::KEY_REPEAT);
-                        if !hotkey.contains(&e.detail) || repeat {
-                            continue;
-                        }
-                        // Ask the server rather than tracking presses: a release made while
-                        // another window had focus (Alt+Tab out of the game) is never seen here.
-                        let mods = conn
-                            .query_pointer(root)
-                            .ok()
-                            .and_then(|c| c.reply().ok())
-                            .map_or(0, |r| u16::from(r.mask));
-                        if mods & blocking != 0 {
-                            log::info!("hotkey ignored: Ctrl, Alt or Super is held");
-                            continue;
-                        }
-                        let (window, center) = atoms.active_window(&conn, root);
-                        let matches = matches(&window);
-                        log::info!(
-                            "hotkey in {window:?}: {}",
-                            if matches {
-                                "toggling the map"
-                            } else {
-                                "not the game"
-                            }
-                        );
-                        if matches {
-                            on_press(center);
+                        // Once per distinct problem, not every few seconds.
+                        let text = format!("{e:#}");
+                        if failing.as_ref() != Some(&text) {
+                            log::warn!(
+                                "hotkey not available yet: {text}. Trying again every few \
+                                 seconds; `dayz-map toggle` works meanwhile."
+                            );
+                            failing = Some(text);
                         }
                     }
-                    Event::PropertyNotify(e) if e.atom == atoms.active_window => {
-                        let focused = matches(&atoms.active_window(&conn, root).0);
-                        if game_focused && !focused {
-                            on_unfocus();
-                        }
-                        game_focused = focused;
-                    }
-                    _ => {}
                 }
+                std::thread::sleep(RECONNECT);
+                next = Listener::connect(keysym, &name);
             }
         })?;
     Ok(())
+}
+
+/// A connection to XWayland set up to report the hotkey and focus changes.
+struct Listener {
+    conn: RustConnection,
+    root: Window,
+    hotkey: Vec<u32>,
+    /// Modifier bits that stop the hotkey (Ctrl, Alt, Super).
+    blocking: u16,
+    atoms: Atoms,
+}
+
+impl Listener {
+    fn connect(keysym: u32, name: &str) -> Result<Self> {
+        let (conn, screen) = RustConnection::connect(None).context("connecting to XWayland")?;
+        let root = conn.setup().roots[screen].root;
+        let version = conn
+            .xinput_xi_query_version(2, 2)?
+            .reply()
+            .context("XInput2 is not available")?;
+        log::debug!("XInput {}.{}", version.major_version, version.minor_version);
+
+        let keycodes = Keycodes::load(&conn)?;
+        let hotkey = keycodes.find(keysym);
+        log::debug!("hotkey keycodes {hotkey:?}");
+        if hotkey.is_empty() {
+            bail!("no key on the keyboard produces {name:?}");
+        }
+        // Ctrl, Alt and Super combinations are left alone; Shift is allowed (it's sprint in
+        // DayZ).
+        let blocking: Vec<u32> = [0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03]
+            .into_iter()
+            .flat_map(|k| keycodes.find(k))
+            .collect();
+        let blocking = modifier_mask(&conn, &blocking)?;
+
+        conn.xinput_xi_select_events(
+            root,
+            &[xinput::EventMask {
+                deviceid: ALL_DEVICES,
+                mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
+            }],
+        )?
+        .check()
+        .context("selecting XInput2 raw key events")?;
+        let atoms = Atoms::new(&conn)?;
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )?
+        .check()
+        .context("watching the focused window")?;
+        Ok(Self {
+            conn,
+            root,
+            hotkey,
+            blocking,
+            atoms,
+        })
+    }
+
+    /// Handles events until the connection breaks.
+    fn listen(
+        &self,
+        matches: &dyn Fn(&str) -> bool,
+        on_press: &dyn Fn(Option<(i32, i32)>),
+        on_unfocus: &dyn Fn(),
+    ) -> anyhow::Error {
+        let Self {
+            conn,
+            root,
+            hotkey,
+            blocking,
+            atoms,
+        } = self;
+        let (root, blocking) = (*root, *blocking);
+        let mut game_focused = matches(&atoms.active_window(conn, root).0);
+        loop {
+            let event = match conn.wait_for_event() {
+                Ok(event) => event,
+                Err(e) => return e.into(),
+            };
+            match event {
+                // A master device repeats its slave's event; count each press once.
+                Event::XinputRawKeyPress(e) if e.deviceid == e.sourceid => {
+                    let repeat = e.flags.contains(xinput::KeyEventFlags::KEY_REPEAT);
+                    if !hotkey.contains(&e.detail) || repeat {
+                        continue;
+                    }
+                    // Ask the server rather than tracking presses: a release made while
+                    // another window had focus (Alt+Tab out of the game) is never seen here.
+                    let mods = conn
+                        .query_pointer(root)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .map_or(0, |r| u16::from(r.mask));
+                    if mods & blocking != 0 {
+                        log::info!("hotkey ignored: Ctrl, Alt or Super is held");
+                        continue;
+                    }
+                    let (window, center) = atoms.active_window(conn, root);
+                    let matches = matches(&window);
+                    log::info!(
+                        "hotkey in {window:?}: {}",
+                        if matches {
+                            "toggling the map"
+                        } else {
+                            "not the game"
+                        }
+                    );
+                    if matches {
+                        on_press(center);
+                    }
+                }
+                Event::PropertyNotify(e) if e.atom == atoms.active_window => {
+                    let focused = matches(&atoms.active_window(conn, root).0);
+                    if game_focused && !focused {
+                        on_unfocus();
+                    }
+                    game_focused = focused;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// The modifier-state bits (Mod1, Mod4, ...) that any of `keycodes` sets.

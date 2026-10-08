@@ -22,7 +22,7 @@ const CLUSTER_M: f32 = 400.0;
 type WaterPoint<'a> = (f32, f32, &'a str);
 
 /// Lower-case class names that extend `Well` in any of these archives' scripts.
-pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
+pub fn well_classes(scripts: &[Arc<Pbo>]) -> anyhow::Result<HashSet<String>> {
     // Each class's subclasses. Scripts redeclare classes (`modded class`, other mods), and any
     // one path to `Well` counts.
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -31,8 +31,12 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
             if !entry.name.to_ascii_lowercase().ends_with(".c") {
                 continue;
             }
-            let Ok(data) = pbo.read(entry) else {
-                continue;
+            let data = match pbo.read(entry) {
+                Ok(data) => data,
+                // Without this file a well class could go missing, and with it every one of
+                // its wells.
+                Err(e) if super::pbo::is_io(&e) => return Err(e),
+                Err(_) => continue,
             };
             // Every file: a class can extend `Well` through others declared elsewhere
             // (`LabTap extends Sink`, with `Sink extends Well` in another file).
@@ -54,7 +58,7 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
         }
     }
     wells.remove("well");
-    wells
+    Ok(wells)
 }
 
 /// `class A extends B` and `class A : B`, lower-cased.

@@ -41,29 +41,41 @@ pub struct Progress {
 struct ImportLock(std::path::PathBuf);
 
 impl ImportLock {
-    /// Older than this, a lock is left from a crash (imports take seconds).
+    /// Older than this, a lock is left from a crash (imports take seconds to a minute or two).
     const STALE: std::time::Duration = std::time::Duration::from_secs(600);
 
-    fn take(map_dir: &Path) -> Result<Self> {
+    /// Takes the map's lock, waiting for another import of it (the overlay and the command
+    /// line, say) to finish. Also says whether it waited, in which case the map may now be
+    /// up to date.
+    fn take(map_dir: &Path) -> Result<(Self, bool)> {
         std::fs::create_dir_all(map_dir)?;
         let path = map_dir.join("import.lock");
-        for _ in 0..2 {
+        let mut waited = false;
+        let mut cleared = false;
+        loop {
             match std::fs::File::create_new(&path) {
-                Ok(_) => return Ok(Self(path)),
+                Ok(_) => return Ok((Self(path), waited)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let age = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|t| t.elapsed().ok());
                     if age.is_some_and(|age| age < Self::STALE) {
-                        bail!("this map is already being imported");
+                        if !waited {
+                            log::info!("waiting for another import of {}", map_dir.display());
+                        }
+                        waited = true;
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    } else if cleared {
+                        bail!("couldn't lock {}", path.display());
+                    } else {
+                        cleared = true;
+                        let _ = std::fs::remove_file(&path);
                     }
-                    let _ = std::fs::remove_file(&path);
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        bail!("couldn't lock {}", path.display())
     }
 }
 
@@ -91,7 +103,13 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     );
 
     let dir = maps::maps_dir().join(&source.id);
-    let _lock = ImportLock::take(&dir)?;
+    let (_lock, waited) = ImportLock::take(&dir)?;
+    if waited
+        && let Ok(pack) = maps::load(&dir)
+        && source.is_current(&pack)
+    {
+        return Ok(pack);
+    }
     // Points of interest first: they don't depend on the tiles, and the tiles replace the old
     // ones as soon as they're built.
     write_pois(source, &dir)?;
@@ -118,10 +136,12 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
 
 /// Rebuilds only the points of interest of an imported map.
 pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
-    let _lock = ImportLock::take(&pack.dir)?;
+    let (_lock, _) = ImportLock::take(&pack.dir)?;
     // Another import may have rewritten it since it was loaded.
     let mut meta = maps::load(&pack.dir)?.meta;
-    write_pois(source, &pack.dir)?;
+    if meta.pois_source != source.pois_fingerprint() {
+        write_pois(source, &pack.dir)?;
+    }
     meta.pois_source = source.pois_fingerprint();
     maps::save_meta(&pack.dir, &meta)?;
     pack.meta = meta;
@@ -132,9 +152,11 @@ fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
     let (mut markers, zones) = source
         .economy
         .as_ref()
-        .map(|e| poi::from_economy(&e.read_all()))
+        .map(|e| e.read_all().map(|files| poi::from_economy(&files)))
+        .transpose()
+        .context("reading the economy files")?
         .unwrap_or_default();
-    let water = water_markers(source);
+    let water = water_markers(source)?;
     if water.iter().any(|m| m.kind == poi::Kind::Water) {
         // The terrain lists every well; the economy only the ones that spawn loot.
         markers.retain(|m| m.kind != poi::Kind::Water);
@@ -174,23 +196,26 @@ fn write_pois(source: &WorldSource, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn water_markers(source: &WorldSource) -> Vec<poi::Marker> {
+/// The terrain's wells and fresh water. A world file that can't be read right now is an error
+/// (the caller keeps the markers it has); one that's corrupt just gives none.
+fn water_markers(source: &WorldSource) -> Result<Vec<poi::Marker>> {
     let Some(terrain) = &source.terrain else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let data = match terrain.read() {
         Ok(data) => data,
+        Err(e) if pbo::is_io(&e) => return Err(e.context("reading the world file")),
         Err(e) => {
             log::warn!("{}: reading the world file: {e:#}", source.name);
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
     let Some(objects) = wrp::objects(&data, |m| water::fresh_water(m).is_some()) else {
         log::warn!("{}: couldn't read the world file's objects", source.name);
-        return Vec::new();
+        return Ok(Vec::new());
     };
     drop(data);
-    let wells = water::well_classes(&source.scripts);
+    let wells = water::well_classes(&source.scripts)?;
     let markers = water::markers(&objects, &wells);
     log::info!(
         "{}: {} wells, {} fresh water",
@@ -204,7 +229,7 @@ fn water_markers(source: &WorldSource) -> Vec<poi::Marker> {
             .filter(|m| m.kind == poi::Kind::FreshWater)
             .count()
     );
-    markers
+    Ok(markers)
 }
 
 fn build_layer(
@@ -223,11 +248,13 @@ fn build_layer(
     let overlap_px = (layout.overlap_frac * f64::from(src_px)).round() as u32;
     let tile_px = src_px - 2 * overlap_px;
     // Every tile is scaled to the largest one's size, so a mod pairing one huge tile with a big
-    // grid of tiny ones would take hours and gigabytes. Real maps are about 16,000 px across.
-    if u64::from(tile_px) * u64::from(source.grid) > 40_960 {
+    // grid of tiny ones would take hours and gigabytes. Real maps are about 16,000 px across,
+    // in tiles of 320 to 480 px, at most 64 to a side.
+    if tile_px > 1024 || source.grid > 256 || u64::from(tile_px) * u64::from(source.grid) > 40_960 {
         bail!(
-            "the satellite image would be {} px across, too large to be a real map",
-            u64::from(tile_px) * u64::from(source.grid)
+            "the satellite image would be {} tiles of {tile_px} px across, too large to be a \
+             real map",
+            source.grid
         );
     }
     let max_level = source.grid.next_power_of_two().trailing_zeros();
@@ -492,7 +519,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         origin: [0.0, world_size],
     };
     let dir = maps::maps_dir().join(id);
-    let _lock = ImportLock::take(&dir)?;
+    let (_lock, _) = ImportLock::take(&dir)?;
     // Built beside the old picture, which stays until the new one is complete.
     let layer_dir = dir.join(&layer.id);
     let work_dir = dir.join(format!("{}.importing", layer.id));

@@ -46,13 +46,20 @@ pub struct EconomySource {
 }
 
 impl EconomySource {
-    pub fn read_all(&self) -> HashMap<String, Vec<u8>> {
-        self.files
-            .iter()
-            .filter_map(|(name, &i)| {
-                Some((name.clone(), self.pbo.read(&self.pbo.entries[i]).ok()?))
-            })
-            .collect()
+    /// Every file that reads. A corrupt one is skipped, but a failing read (a file another
+    /// program has locked, say) fails the whole thing, so the caller keeps what it had.
+    pub fn read_all(&self) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+        let mut files = HashMap::new();
+        for (name, &i) in &self.files {
+            match self.pbo.read(&self.pbo.entries[i]) {
+                Ok(data) => {
+                    files.insert(name.clone(), data);
+                }
+                Err(e) if super::pbo::is_io(&e) => return Err(e),
+                Err(e) => log::warn!("skipped {name}: {e:#}"),
+            }
+        }
+        Ok(files)
     }
 }
 

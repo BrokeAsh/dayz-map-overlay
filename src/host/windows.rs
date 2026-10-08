@@ -421,7 +421,15 @@ impl ApplicationHandler<HostEvent> for Host {
             return;
         }
         if std::mem::take(&mut self.show_at_start) {
-            self.show(false);
+            // Restarted with the map open over the game: the game is in front, and the map
+            // should close again when the user switches away from it.
+            let game = win::foreground()
+                .filter(|front| !front.ours && self.matches_game(&front.description))
+                .map(|front| front.hwnd);
+            if game.is_some() {
+                self.game = game;
+            }
+            self.show(game.is_some());
         }
     }
 

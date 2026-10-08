@@ -130,6 +130,12 @@ impl Watcher {
             }
             for line in self.read_new_lines(&script) {
                 if let Some(world) = mission_world(&line) {
+                    // Back at the main menu after playing: the player may join any server
+                    // next, so the launch address no longer says which.
+                    if world.is_none() && self.session.world.is_some() {
+                        self.session.server = None;
+                        self.query_port = None;
+                    }
                     self.session.world = world;
                 }
             }
@@ -188,8 +194,7 @@ impl Watcher {
     }
 
     /// Asks the server for its name once per server and map (again later if it didn't answer),
-    /// and only keeps it if the server reports the map the game is on (the launch address is
-    /// stale if the player switched servers in game).
+    /// and only keeps it if the server reports the map the game is on.
     fn update_server_name(&mut self) {
         let (Some(server), Some(world), Some(query)) =
             (&self.session.server, &self.session.world, self.query_port)
@@ -202,7 +207,6 @@ impl Watcher {
             && *queried == key
             && (name.is_some() || at.elapsed() < QUERY_RETRY)
         {
-            // Also restores the name after a trip to the main menu.
             self.session.server_name = name.clone();
             return;
         }

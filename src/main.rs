@@ -131,7 +131,7 @@ fn main() -> Result<()> {
 
 fn run(command: Cmd) -> Result<()> {
     match command {
-        Cmd::Run { show, .. } => host::run(Config::load(), show),
+        Cmd::Run { show, restarted } => host::run(Config::load(), show, restarted),
         Cmd::Toggle => ipc::send(ipc::Command::Toggle),
         Cmd::Show => ipc::send(ipc::Command::Show),
         Cmd::Hide => ipc::send(ipc::Command::Hide),
@@ -259,6 +259,27 @@ fn autostart(on: bool) -> Result<()> {
 }
 
 /// Adds or removes a login entry (`~/.config/autostart`) that runs this binary.
+/// One argument for a desktop entry's `Exec=`, quoted. Two layers: inside the quotes, `"`,
+/// `` ` ``, `$` and `\` take a backslash; then the key is a string value, whose own escapes
+/// double every backslash. A literal `%` is `%%`.
+#[cfg(not(windows))]
+fn desktop_exec_arg(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => out.extend(['\\', '\\', c]),
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(not(windows))]
 fn autostart(on: bool) -> Result<()> {
     let dirs = directories::BaseDirs::new().context("no home directory")?;
@@ -272,18 +293,10 @@ fn autostart(on: bool) -> Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?.canonicalize()?;
-    // Desktop entries quote arguments with double quotes and escape `"`, `` ` ``, `$` and `\`.
-    let quoted: String = exe
-        .to_string_lossy()
-        .chars()
-        .flat_map(|c| {
-            let escape = matches!(c, '"' | '`' | '$' | '\\');
-            escape.then_some('\\').into_iter().chain([c])
-        })
-        .collect();
+    let quoted = desktop_exec_arg(&exe.to_string_lossy());
     let text = format!(
         "[Desktop Entry]\nType=Application\nName=DayZ Map Overlay\n\
-         Comment=Press M in DayZ to open a see-through map\nExec=\"{quoted}\" run\n\
+         Comment=Press M in DayZ to open a see-through map\nExec={quoted} run\n\
          Icon=map-flat\nTerminal=false\nNoDisplay=true\nX-KDE-autostart-phase=2\n"
     );
     std::fs::create_dir_all(entry.parent().unwrap())?;
@@ -451,4 +464,16 @@ fn import(config: &Config, worlds: &[String], all: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    #[test]
+    fn desktop_exec_quoting() {
+        assert_eq!(
+            super::desktop_exec_arg("/home/a/100% \"ready\"/dayz-map"),
+            r#""/home/a/100%% \\"ready\\"/dayz-map""#
+        );
+        assert_eq!(super::desktop_exec_arg(r"/a\b$c"), r#""/a\\\\b\\$c""#);
+    }
 }

@@ -47,6 +47,12 @@ pub fn stamp(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a read failed in the file system (locked, unplugged, unreadable) rather than in the
+/// data, so trying again later may work.
+pub fn is_io(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some()
+}
+
 fn read_cstr(r: &mut impl BufRead) -> Result<String> {
     // Names and header values are short; a file without NULs mustn't be read whole.
     let mut buf = Vec::new();
@@ -126,6 +132,8 @@ impl Pbo {
         stamp(&self.path) != self.opened
     }
 
+    /// Reads and unpacks an entry. Errors from the file system come back as `io::Error`
+    /// (see [`is_io`]); anything else means the entry itself is bad.
     pub fn read(&self, entry: &PboEntry) -> Result<Vec<u8>> {
         let data = self.read_raw(entry, entry.size as usize)?;
         match entry.method {
