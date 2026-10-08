@@ -320,7 +320,7 @@ impl Host {
         // The GPU surface must go before the Wayland surface it draws to.
         overlay.surface.take();
         drop(overlay);
-        self.events.clear();
+        self.events = super::release_pointer();
         self.pointer_pos = None;
         self.keyboard_focus = false;
         self.last_hide = Instant::now();

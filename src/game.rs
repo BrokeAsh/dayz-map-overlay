@@ -28,6 +28,8 @@ pub struct Session {
 const POLL: Duration = Duration::from_secs(1);
 /// How often to look for the logs folder again while it's missing.
 const RELOCATE: Duration = Duration::from_secs(10);
+/// Longest script-log line kept (real ones are a few hundred bytes).
+const MAX_LINE: usize = 64 * 1024;
 /// How much of the script log to read at a time (and of an existing one, from its end).
 const LOG_TAIL: u64 = 4 << 20;
 /// How long to wait before asking a server that didn't answer for its name again.
@@ -81,15 +83,20 @@ struct Watcher {
     session: Session,
     /// The last server-name query: its (server, map), the name, and when it ran.
     queried: Option<((String, String), Option<String>, Instant)>,
+    /// Skipping the rest of a line too long to keep.
+    overlong: bool,
     relocated: Option<Instant>,
 }
 
 impl Watcher {
     fn poll(&mut self) -> Session {
-        if !dayz_running() {
+        let Some(started) = dayz_started() else {
             *self = Self::default();
             return Session::default();
-        }
+        };
+        // Logs from before this game started belong to an earlier session (the game may be
+        // running with -nologs). A little slack for file-time granularity.
+        let since = started - Duration::from_secs(5);
         self.session.running = true;
         let mut paths = crate::paths::current();
         // The logs folder appears the first time the game runs.
@@ -99,7 +106,7 @@ impl Watcher {
         }
         let dirs: Vec<PathBuf> = paths.logs.iter().map(|l| l.path.clone()).collect();
 
-        if let Some(rpt) = newest(&dirs, "DayZ_x64_", ".RPT")
+        if let Some(rpt) = newest(&dirs, "DayZ_x64_", ".RPT", since)
             && self.rpt.as_ref() != Some(&rpt)
             // The game may not have written the command line yet; try again next time.
             && let Some((server, query, mods)) =
@@ -113,11 +120,12 @@ impl Watcher {
             self.query_port = query;
         }
 
-        if let Some(script) = newest(&dirs, "script_", ".log") {
+        if let Some(script) = newest(&dirs, "script_", ".log", since) {
             if self.script.as_ref() != Some(&script) {
                 self.script = Some(script.clone());
                 self.offset = 0;
                 self.partial.clear();
+                self.overlong = false;
                 self.session.world = None;
             }
             for line in self.read_new_lines(&script) {
@@ -139,6 +147,7 @@ impl Watcher {
         if len < self.offset {
             self.offset = 0;
             self.partial.clear();
+            self.overlong = false;
         }
         // A long modded session's log can be hundreds of MB: start at its latest mission.
         if self.offset == 0 && len > LOG_TAIL {
@@ -152,13 +161,29 @@ impl Watcher {
             return Vec::new();
         }
         self.offset += bytes.len() as u64;
-        self.partial.push_str(&String::from_utf8_lossy(&bytes));
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if self.overlong {
+            // Still in a line that was too long to keep: skip to its end.
+            match text.find('\n') {
+                Some(end) => {
+                    text.drain(..=end);
+                    self.overlong = false;
+                }
+                None => text.clear(),
+            }
+        }
+        self.partial.push_str(&text);
         let complete = self.partial.rfind('\n').map_or(0, |i| i + 1);
         let lines = self.partial[..complete]
             .lines()
             .map(str::to_string)
             .collect();
         self.partial.drain(..complete);
+        // Real lines are short; don't buffer a damaged log's endless one.
+        if self.partial.len() > MAX_LINE {
+            self.partial.clear();
+            self.overlong = true;
+        }
         lines
     }
 
@@ -348,7 +373,8 @@ fn arguments(line: &str) -> Vec<String> {
     args
 }
 
-fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str) -> Option<PathBuf> {
+/// The newest log with this name pattern written since `since`.
+fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str, since: SystemTime) -> Option<PathBuf> {
     dirs.iter()
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flatten()
@@ -358,21 +384,23 @@ fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str) -> Option<PathBuf> {
             name.starts_with(prefix) && name.ends_with(suffix)
         })
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter(|(modified, _)| *modified >= since)
         .max_by_key(|(modified, _): &(SystemTime, PathBuf)| *modified)
         .map(|(_, path)| path)
 }
 
 #[cfg(windows)]
-fn dayz_running() -> bool {
-    crate::win::process_running("DayZ_x64.exe")
+/// When the running game started, if it's running.
+fn dayz_started() -> Option<SystemTime> {
+    crate::win::process_started("DayZ_x64.exe")
 }
 
 #[cfg(not(windows))]
-fn dayz_running() -> bool {
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    procs.flatten().any(|p| {
+/// When the running game (under Proton) started, if it's running (the epoch if its start time
+/// can't be read).
+fn dayz_started() -> Option<SystemTime> {
+    let procs = std::fs::read_dir("/proc").ok()?;
+    let process = procs.flatten().find(|p| {
         p.file_name()
             .to_string_lossy()
             .bytes()
@@ -381,7 +409,44 @@ fn dayz_running() -> bool {
                 c.windows(12)
                     .any(|w| w.eq_ignore_ascii_case(b"DayZ_x64.exe"))
             })
-    })
+    })?;
+    Some(process_start(&process.path()).unwrap_or(SystemTime::UNIX_EPOCH))
+}
+
+/// A process's start time: `/proc/<pid>/stat` has it in clock ticks after boot, and
+/// `/proc/stat` has the boot time.
+#[cfg(target_os = "linux")]
+fn process_start(proc_dir: &Path) -> Option<SystemTime> {
+    let stat = std::fs::read_to_string(proc_dir.join("stat")).ok()?;
+    // Fields after the parenthesized name; the start time is field 22 overall.
+    let ticks: u64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    let boot: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: a plain query.
+    let per_second = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()?
+        .max(1);
+    Some(
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(boot)
+            + Duration::from_millis(ticks * 1000 / per_second),
+    )
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn process_start(_proc_dir: &Path) -> Option<SystemTime> {
+    None
 }
 
 /// Steam server query (A2S_INFO): returns the server name and map.
@@ -455,6 +520,14 @@ mod tests {
         }
         std::fs::remove_file(&path).unwrap();
         assert_eq!(world.as_deref(), Some("namalsk"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn own_start_time() {
+        let started = process_start(Path::new("/proc/self")).unwrap();
+        let age = started.elapsed().unwrap_or_default();
+        assert!(age < Duration::from_secs(60), "{age:?}");
     }
 
     #[test]

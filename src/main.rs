@@ -40,6 +40,9 @@ enum Cmd {
         /// Open the overlay immediately (useful for testing).
         #[arg(long)]
         show: bool,
+        /// Started again after losing the graphics device: keep the log that says why.
+        #[arg(long, hide = true)]
+        restarted: bool,
     },
     /// Show or hide the running overlay.
     Toggle,
@@ -84,7 +87,16 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Cmd::Run { show: false });
+    let command = cli.command.unwrap_or(Cmd::Run {
+        show: false,
+        restarted: false,
+    });
+    if let Cmd::Run {
+        restarted: true, ..
+    } = command
+    {
+        KEEP_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let overlay = matches!(command, Cmd::Run { .. });
     // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
     // stopping is what command-line tools do. The overlay keeps ignoring it, so a closed log
@@ -119,7 +131,7 @@ fn main() -> Result<()> {
 
 fn run(command: Cmd) -> Result<()> {
     match command {
-        Cmd::Run { show } => host::run(Config::load(), show),
+        Cmd::Run { show, .. } => host::run(Config::load(), show),
         Cmd::Toggle => ipc::send(ipc::Command::Toggle),
         Cmd::Show => ipc::send(ipc::Command::Show),
         Cmd::Hide => ipc::send(ipc::Command::Hide),
@@ -187,11 +199,14 @@ fn log_path() -> PathBuf {
     config::data_dir().join("dayz-map.log")
 }
 
+/// Set for a restart, whose log should continue the previous run's.
+static KEEP_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Starts the log over; called once this is known to be the only overlay running. (Through a
 /// second handle: Windows can't truncate through an append-only one. Appends then continue
 /// from the new end.)
 pub fn fresh_log() {
-    if LOG_FILE.get().is_some() {
+    if LOG_FILE.get().is_some() && !KEEP_LOG.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = std::fs::OpenOptions::new()
             .write(true)
             .open(log_path())

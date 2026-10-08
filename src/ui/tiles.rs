@@ -173,6 +173,13 @@ impl TileCache {
 
     /// Drops every tile sharper than `max_level`, keeping the cheap overview levels warm.
     pub fn trim(&mut self, max_level: u32) {
+        // Nothing is on screen now: loads still queued are skipped rather than decoded and kept
+        // waiting until the overlay opens again.
+        {
+            let mut wanted = self.wanted.lock().unwrap();
+            wanted.current.clear();
+            wanted.previous.clear();
+        }
         self.entries.retain(|path, _| {
             let level = path
                 .parent()

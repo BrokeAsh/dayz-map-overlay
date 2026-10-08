@@ -85,27 +85,52 @@ pub fn delete_registry_value(root: HKEY, key: &str, value: &str) -> std::io::Res
     }
 }
 
-/// True if a process with this executable name is running.
-pub fn process_running(exe: &str) -> bool {
+/// When a process with this executable name started, if one is running (the epoch if its
+/// start time can't be read).
+pub fn process_started(exe: &str) -> Option<std::time::SystemTime> {
     // SAFETY: the snapshot handle is closed before returning; the entry's size field is set.
-    unsafe {
+    let pid = unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snapshot.is_null() || snapshot as isize == -1 {
-            return false;
+            return None;
         }
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-        let mut found = false;
+        let mut found = None;
         let mut ok = Process32FirstW(snapshot, &mut entry) != 0;
         while ok {
             if from_wide(&entry.szExeFile).eq_ignore_ascii_case(exe) {
-                found = true;
+                found = Some(entry.th32ProcessID);
                 break;
             }
             ok = Process32NextW(snapshot, &mut entry) != 0;
         }
         CloseHandle(snapshot);
         found
+    }?;
+    Some(started(pid).unwrap_or(std::time::UNIX_EPOCH))
+}
+
+fn started(pid: u32) -> Option<std::time::SystemTime> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    // SAFETY: the handle is closed; the FILETIMEs are plain out-parameters.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        let ok = GetProcessTimes(process, created, exited, kernel, user) != 0;
+        CloseHandle(process);
+        if !ok {
+            return None;
+        }
+        // 100-nanosecond steps since 1601.
+        let ticks = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
+        let since_1970 = ticks.checked_sub(116_444_736_000_000_000)?;
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(since_1970 * 100))
     }
 }
 

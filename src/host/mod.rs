@@ -2,13 +2,33 @@
 
 mod gpu;
 
-/// Starts a fresh copy of the overlay (after the graphics device was lost). Called once this
-/// one has let go of the control channel and instance lock.
+/// Input that ends any click or drag in progress. Closing the overlay mid-drag means it never
+/// sees the button come up, and egui would keep dragging on the next mouse move.
+fn release_pointer() -> Vec<egui::Event> {
+    let release = |button| egui::Event::PointerButton {
+        pos: egui::Pos2::ZERO,
+        button,
+        pressed: false,
+        modifiers: Default::default(),
+    };
+    vec![
+        release(egui::PointerButton::Primary),
+        release(egui::PointerButton::Secondary),
+        release(egui::PointerButton::Middle),
+        egui::Event::PointerGone,
+    ]
+}
+
+/// Starts a fresh copy of the overlay after the graphics device was lost, open again: the loss
+/// is noticed while drawing, so the map was open. Called once this one has let go of the
+/// control channel and instance lock.
 fn restart() {
     log::info!("restarting the overlay");
     match std::env::current_exe() {
         Ok(exe) => {
-            if let Err(e) = std::process::Command::new(exe).arg("run").spawn() {
+            let mut command = std::process::Command::new(exe);
+            command.args(["run", "--restarted", "--show"]);
+            if let Err(e) = command.spawn() {
                 log::error!("restarting the overlay: {e}");
             }
         }

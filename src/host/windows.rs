@@ -263,9 +263,14 @@ impl Host {
         if !self.visible {
             return;
         }
-        if let Some(overlay) = &self.window {
+        if let Some(overlay) = &mut self.window {
             // SAFETY: hiding our own window.
             unsafe { ShowWindow(overlay.hwnd, SW_HIDE) };
+            overlay
+                .input
+                .egui_input_mut()
+                .events
+                .extend(super::release_pointer());
         }
         self.visible = false;
         self.last_hide = Instant::now();
@@ -511,6 +516,9 @@ fn hotkey_key(name: &str) -> Option<PhysicalKey> {
         (scan != -1).then_some((scan & 0xff) as u16)
     };
     let vk = match (chars.next(), chars.next()) {
+        // Letter and digit keys have fixed key codes, whatever layout is active (with Russian as
+        // the default, `VkKeyScanW` finds no key for `m`).
+        (Some(c), None) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as u16,
         (Some(c), None) => from_char(c)?,
         _ => match lower.as_str() {
             "tab" => VK_TAB,

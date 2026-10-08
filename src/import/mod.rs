@@ -470,13 +470,16 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
     };
     let dir = maps::maps_dir().join(id);
     let _lock = ImportLock::take(&dir)?;
+    // Built beside the old picture, which stays until the new one is complete.
     let layer_dir = dir.join(&layer.id);
-    if layer_dir.exists() {
-        std::fs::remove_dir_all(&layer_dir)?;
+    let work_dir = dir.join(format!("{}.importing", layer.id));
+    if work_dir.exists() {
+        std::fs::remove_dir_all(&work_dir)?;
     }
+    let mut work = RemoveOnDrop(Some(work_dir.clone()));
     let mut current = image;
     for level in (0..=max_level).rev() {
-        let level_dir = layer_dir.join(level.to_string());
+        let level_dir = work_dir.join(level.to_string());
         std::fs::create_dir_all(&level_dir)?;
         let tiles = layer.grid_at(level);
         let padded_side = tiles * TILE_PX;
@@ -491,6 +494,11 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         }
         current = downsample(&current);
     }
+    if layer_dir.exists() {
+        std::fs::remove_dir_all(&layer_dir)?;
+    }
+    std::fs::rename(&work_dir, &layer_dir)?;
+    work.0 = None;
     let mut meta = maps::load(&dir)
         .map(|p| p.meta)
         .unwrap_or_else(|_| MapMeta {

@@ -252,6 +252,10 @@ impl OverlayApp {
                     log::warn!("saving settings: {e:#}");
                 }
                 self.library.relocate(&self.config);
+                // The game may already be on a map that couldn't be found before.
+                if let Some(world) = &self.session.world {
+                    self.library.ensure(world, &self.session.mods);
+                }
             }
             None => {
                 self.notice = Some(format!(

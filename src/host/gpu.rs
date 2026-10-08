@@ -36,8 +36,18 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("dayz-map"),
+                // The default 8192 px is less than a scaled 8K-wide monitor needs.
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    ..wgpu::Limits::default()
+                },
                 ..Default::default()
             }))?;
+        // wgpu panics on errors nobody captured, such as running out of graphics memory while
+        // the game fills it; log them instead.
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            log::error!("graphics error: {error}");
+        }));
         let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = lost.clone();
         device.set_device_lost_callback(move |reason, message| {
