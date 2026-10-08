@@ -303,10 +303,12 @@ fn launch_options(
     rpt: &Path,
     game: Option<&Path>,
 ) -> Option<(Option<String>, Option<u16>, Vec<String>)> {
-    let mut head = String::new();
+    let mut bytes = Vec::new();
     if let Ok(file) = std::fs::File::open(rpt) {
-        let _ = file.take(64 * 1024).read_to_string(&mut head);
+        let _ = file.take(64 * 1024).read_to_end(&mut bytes);
     }
+    // Lossy: a stray byte, or a character cut at the 64 KB mark, mustn't hide the whole head.
+    let head = String::from_utf8_lossy(&bytes);
     // Only whole lines: the last one may still be being written.
     let complete = &head[..head.rfind('\n').map_or(0, |i| i + 1)];
     let Some(line) = complete

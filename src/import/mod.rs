@@ -100,7 +100,6 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     // whole.
     let pois = pois_json(source)?;
     let layer = build_layer(tiles, &layout, &dir, progress)?;
-    write_pois(&dir, &pois)?;
 
     let meta = MapMeta {
         id: source.id.clone(),
@@ -117,15 +116,22 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
             .chain([layer])
             .collect(),
     };
-    save_meta_or_forget(&dir, &meta)?;
+    publish(&dir, &pois, &meta)?;
     Ok(MapPack { meta, dir })
 }
 
 /// Rebuilds only the points of interest of an imported map.
 pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     let (_lock, _) = ImportLock::take(&pack.dir)?;
-    // Another import may have rewritten it since it was loaded.
-    let mut meta = maps::load(&pack.dir)?.meta;
+    // Another import may have rewritten it since it was loaded, maybe from another copy of the
+    // terrain (an experimental build): leave that one's points of interest alone.
+    let current = maps::load(&pack.dir)?;
+    if !source.is_current(&current) {
+        log::info!("{} was reimported meanwhile", current.meta.name);
+        *pack = current;
+        return Ok(());
+    }
+    let mut meta = current.meta;
     if meta.pois_source != source.pois_fingerprint() {
         write_pois(&pack.dir, &pois_json(source)?)?;
     }
@@ -330,6 +336,16 @@ fn build_layer(
     std::fs::rename(&work_dir, &final_dir)?;
     work.0 = None;
     Ok(meta)
+}
+
+/// Saves the points of interest and metadata for tiles just swapped in; if either fails, the old
+/// metadata is set aside as below.
+fn publish(dir: &Path, pois: &[u8], meta: &MapMeta) -> Result<()> {
+    if let Err(e) = write_pois(dir, pois) {
+        let _ = std::fs::rename(dir.join("map.toml"), dir.join("map.toml.stale"));
+        return Err(e);
+    }
+    save_meta_or_forget(dir, meta)
 }
 
 /// Saves the metadata for tiles just swapped in. If that fails, the old metadata no longer

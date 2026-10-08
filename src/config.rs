@@ -40,12 +40,12 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "m".into(),
-            // On Windows, the game's executable: a title containing "DayZ" could be a browser
-            // tab or a chat channel.
+            // Not the title "DayZ": a browser tab or chat channel could match. On Windows the
+            // game's executable; on Linux its window class under Proton, and under plain Wine.
             window_match: if cfg!(windows) {
                 vec!["dayz_x64.exe".into()]
             } else {
-                vec!["steam_app_221100".into(), "DayZ".into()]
+                vec!["steam_app_221100".into(), "dayz_x64.exe".into()]
             },
             game_dir: None,
             log_dir: None,
@@ -85,13 +85,15 @@ impl Config {
         let path = config_path();
         match std::fs::read_to_string(&path) {
             // Windows editors may start the file with a byte-order mark.
-            Ok(text) => toml::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_else(|e| {
-                log::warn!("ignoring invalid {}: {e}", path.display());
-                Self {
-                    unreadable: true,
-                    ..Self::default()
-                }
-            }),
+            Ok(text) => toml::from_str(text.trim_start_matches('\u{feff}'))
+                .map(Self::upgrade)
+                .unwrap_or_else(|e| {
+                    log::warn!("ignoring invalid {}: {e}", path.display());
+                    Self {
+                        unreadable: true,
+                        ..Self::default()
+                    }
+                }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             // Not UTF-8 (Windows PowerShell can write UTF-16), or unreadable.
             Err(e) => {
@@ -102,6 +104,14 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Replaces defaults that older versions saved and that have since changed.
+    fn upgrade(mut self) -> Self {
+        if !cfg!(windows) && self.window_match == ["steam_app_221100", "DayZ"] {
+            self.window_match = Self::default().window_match;
+        }
+        self
     }
 
     /// Saves what the overlay itself changes (view settings, and the game folder when picked),

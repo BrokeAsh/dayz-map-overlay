@@ -30,7 +30,7 @@ toml = "1.1.6"
 libc = "0.2"
 smithay-client-toolkit = "0.21"
 wayland-client = { version = "0.31", features = ["system"] }
-x11rb = { version = "0.14", features = ["xinput"] }
+x11rb = { version = "0.14", features = ["randr", "xinput"] }
 
 [target.'cfg(windows)'.dependencies]
 egui-winit = { version = "0.36", default-features = false }

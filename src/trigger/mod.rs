@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
@@ -23,13 +24,23 @@ const ALL_DEVICES: u16 = 0;
 /// autostarts, or restarting after a crash (Wine can take it down).
 const RECONNECT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Where the game window is, to open the overlay on its monitor.
+#[derive(Debug, Clone)]
+pub struct GameSpot {
+    /// Its centre, in X11 screen coordinates (which differ from Wayland's when XWayland is
+    /// scaled).
+    pub center: (i32, i32),
+    /// The monitor's output name (`DP-1`), which XWayland shares with Wayland.
+    pub monitor: Option<String>,
+}
+
 /// Starts the listener thread; `on_press` runs for each hotkey press in a matching window, with
-/// the centre of that window in global screen coordinates (to open the overlay on its monitor).
+/// where that window is.
 /// `on_unfocus` runs when focus moves from a matching window to anything else. Fails only for a
 /// hotkey that can't be understood; without XWayland it keeps trying in the background.
 pub fn spawn(
     config: &Config,
-    on_press: impl Fn(Option<(i32, i32)>) + Send + 'static,
+    on_press: impl Fn(Option<GameSpot>) + Send + 'static,
     on_unfocus: impl Fn() + Send + 'static,
 ) -> Result<()> {
     let keysym = parse_keysym(&config.hotkey)?;
@@ -137,7 +148,7 @@ impl Listener {
     fn listen(
         &self,
         matches: &dyn Fn(&str) -> bool,
-        on_press: &dyn Fn(Option<(i32, i32)>),
+        on_press: &dyn Fn(Option<GameSpot>),
         on_unfocus: &dyn Fn(),
     ) -> anyhow::Error {
         let Self {
@@ -190,7 +201,10 @@ impl Listener {
                         }
                     );
                     if matches {
-                        on_press(center);
+                        on_press(center.map(|center| GameSpot {
+                            center,
+                            monitor: monitor_at(conn, root, center),
+                        }));
                     }
                 }
                 Event::PropertyNotify(e) if e.atom == atoms.active_window => {
@@ -204,6 +218,17 @@ impl Listener {
             }
         }
     }
+}
+
+/// The name of the monitor (RandR 1.5) containing a point.
+fn monitor_at(conn: &RustConnection, root: Window, (x, y): (i32, i32)) -> Option<String> {
+    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
+    let monitor = reply.monitors.iter().find(|m| {
+        (i32::from(m.x)..i32::from(m.x) + i32::from(m.width)).contains(&x)
+            && (i32::from(m.y)..i32::from(m.y) + i32::from(m.height)).contains(&y)
+    })?;
+    let name = conn.get_atom_name(monitor.name).ok()?.reply().ok()?.name;
+    Some(String::from_utf8_lossy(&name).into_owned())
 }
 
 /// The modifier-state bits (Mod1, Mod4, ...) that any of `keycodes` sets.

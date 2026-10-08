@@ -64,9 +64,9 @@ use crate::config::Config;
 #[derive(Debug, Clone)]
 pub enum HostEvent {
     Command(crate::ipc::Command),
-    /// The hotkey was pressed in the game, whose window is centred at this point.
+    /// The hotkey was pressed in the game, whose window is here.
     #[cfg(target_os = "linux")]
-    Hotkey(Option<(i32, i32)>),
+    Hotkey(Option<crate::trigger::GameSpot>),
     /// Another window took focus from the game.
     #[cfg(target_os = "linux")]
     GameUnfocused,

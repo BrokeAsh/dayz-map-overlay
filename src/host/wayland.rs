@@ -80,8 +80,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
     let unfocus_tx = tx.clone();
     if let Err(e) = crate::trigger::spawn(
         &config,
-        move |center| {
-            let _ = hotkey_tx.send(HostEvent::Hotkey(center));
+        move |spot| {
+            let _ = hotkey_tx.send(HostEvent::Hotkey(spot));
         },
         move || {
             let _ = unfocus_tx.send(HostEvent::GameUnfocused);
@@ -139,7 +139,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         next_repaint: None,
         last_hide: Instant::now() - REOPEN_GRACE,
         fade: Fade::new(own_fade()),
-        game_center: None,
+        game_spot: None,
         exit: false,
         restart: false,
     };
@@ -218,7 +218,7 @@ struct Host {
     last_hide: Instant,
     fade: Fade,
     /// Where the game window was last seen, to open the overlay on its monitor.
-    game_center: Option<(i32, i32)>,
+    game_spot: Option<crate::trigger::GameSpot>,
     exit: bool,
     /// Start over when the loop ends (the graphics device was lost).
     restart: bool,
@@ -237,9 +237,9 @@ impl Host {
                 }
             }
             HostEvent::Command(Command::Quit) => self.exit = true,
-            HostEvent::Hotkey(center) => {
-                if center.is_some() {
-                    self.game_center = center;
+            HostEvent::Hotkey(spot) => {
+                if spot.is_some() {
+                    self.game_spot = spot;
                 }
                 if self.overlay.is_some() {
                     self.hide();
@@ -301,7 +301,18 @@ impl Host {
 
     /// The monitor showing the game window; `None` lets the compositor pick (the active one).
     fn game_output(&self) -> Option<wl_output::WlOutput> {
-        let (x, y) = self.game_center?;
+        let spot = self.game_spot.as_ref()?;
+        let info = |output: &wl_output::WlOutput| self.output_state.info(output);
+        if let Some(name) = &spot.monitor
+            && let Some(output) = self
+                .output_state
+                .outputs()
+                .find(|o| info(o).is_some_and(|i| i.name.as_ref() == Some(name)))
+        {
+            return Some(output);
+        }
+        // Positions only agree when XWayland isn't scaled.
+        let (x, y) = spot.center;
         self.output_state.outputs().find(|output| {
             let Some(info) = self.output_state.info(output) else {
                 return false;
