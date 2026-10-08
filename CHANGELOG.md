@@ -26,7 +26,7 @@
 - The overlay restarts itself if the graphics device is lost, and closes when you switch away
   from the game however it was opened.
 - `import-image` refuses pictures over 16384 px across.
-- Building needs Rust 1.89 or newer.
+- Building needs Rust 1.95 or newer.
 
 ## 0.1.0
 

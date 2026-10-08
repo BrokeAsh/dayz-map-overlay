@@ -30,8 +30,15 @@ pub struct LibraryState {
 
 enum Request {
     Scan,
-    Ensure { world: String, mods: Vec<String> },
-    Import { id: String },
+    /// The game left its map: stop retrying it.
+    Forget,
+    Ensure {
+        world: String,
+        mods: Vec<String>,
+    },
+    Import {
+        id: String,
+    },
 }
 
 pub struct Library {
@@ -55,7 +62,8 @@ impl Library {
         Self { requests, state }
     }
 
-    /// Looks for the game again (after the user picked its folder) and rescans.
+    /// Looks for the game again (after the user picked its folder) and rescans, which also
+    /// retries the game's map if it couldn't be found before.
     pub fn relocate(&self, config: &crate::config::Config) {
         paths::refresh(config);
         self.rescan();
@@ -67,6 +75,11 @@ impl Library {
             world: world.to_lowercase(),
             mods: mods.to_vec(),
         });
+    }
+
+    /// The game is no longer on a map (main menu, or closed).
+    pub fn forget(&self) {
+        let _ = self.requests.send(Request::Forget);
     }
 
     pub fn rescan(&self) {
@@ -94,6 +107,7 @@ impl Worker {
                 self.handle(request, &mut upgraded, &mut unsettled)
             }));
             if handled.is_err() {
+                unsettled = None;
                 self.update(|s| {
                     s.job = None;
                     s.scanning = false;
@@ -123,6 +137,7 @@ impl Worker {
                     *unsettled = Some((world, mods));
                 }
             }
+            Request::Forget => *unsettled = None,
             Request::Ensure { world, mods } => {
                 *unsettled = (!self.ensure(&world, &mods)).then_some((world, mods));
             }
@@ -143,7 +158,7 @@ impl Worker {
         self.update(|s| s.scanning = true);
         let start = std::time::Instant::now();
         // Steam folders too: the Workshop folder appears with the first mod download.
-        let paths = paths::refresh(&crate::config::Config::load());
+        let paths = paths::rediscover();
         let catalog = Arc::new(catalog::scan(&catalog::roots(&paths)));
         log::info!(
             "found {} terrains in {:.1?}",

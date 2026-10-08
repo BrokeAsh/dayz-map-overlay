@@ -102,7 +102,7 @@ impl Watcher {
         // The logs folder appears the first time the game runs.
         if paths.logs.is_empty() && self.relocated.is_none_or(|t| t.elapsed() > RELOCATE) {
             self.relocated = Some(Instant::now());
-            paths = crate::paths::refresh(&crate::config::Config::load());
+            paths = crate::paths::rediscover();
         }
         let dirs: Vec<PathBuf> = paths.logs.iter().map(|l| l.path.clone()).collect();
 

@@ -2,7 +2,7 @@
 name = "dayz-map"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 description = "See-through DayZ map overlay that follows the server you're on"
 repository = "https://github.com/BrokeAsh/dayz-map-overlay"
 readme = "README.md"

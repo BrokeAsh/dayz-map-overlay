@@ -175,8 +175,10 @@ pub fn run(config: Config, show: bool) -> Result<()> {
 }
 
 struct Overlay {
-    layer: LayerSurface,
+    /// Declared first, so it's dropped first: the GPU surface must go before the Wayland surface
+    /// it draws to, even when an error or panic skips `hide`.
     surface: Option<wgpu::Surface<'static>>,
+    layer: LayerSurface,
     /// Size in surface (logical) coordinates.
     width: u32,
     height: u32,

@@ -30,6 +30,9 @@ pub struct Located {
 }
 
 static CURRENT: RwLock<Option<Arc<Paths>>> = RwLock::new(None);
+/// The settings they were found with: a folder the user just picked counts even if saving it
+/// to the config file failed.
+static SETTINGS: RwLock<Option<Config>> = RwLock::new(None);
 
 /// The paths found most recently (looked up from the saved config the first time).
 pub fn current() -> Arc<Paths> {
@@ -42,8 +45,15 @@ pub fn current() -> Arc<Paths> {
 /// Looks everything up again, for example after the user picks the game folder.
 pub fn refresh(config: &Config) -> Arc<Paths> {
     let paths = Arc::new(locate(config));
+    *SETTINGS.write().unwrap() = Some(config.clone());
     *CURRENT.write().unwrap() = Some(paths.clone());
     paths
+}
+
+/// Looks everything up again with the same settings (Steam may have made a folder since).
+pub fn rediscover() -> Arc<Paths> {
+    let settings = SETTINGS.read().unwrap().clone();
+    refresh(&settings.unwrap_or_else(Config::load))
 }
 
 /// True for a DayZ install folder.
