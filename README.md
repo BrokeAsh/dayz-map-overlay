@@ -181,7 +181,9 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
   `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
   it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a
   workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings. The overlay
-  then can't tell when you switch away from the game, so close it with the same key.
+  then can't tell when you switch away from the game, so close it with the same key. If it logs
+  `hotkey ignored: DayZ itself isn't running`, check that `dayz-map status` shows the game
+  running (M does nothing in the launcher on purpose).
 - **Scrolling doesn't zoom (Windows):** turn on "Scroll inactive windows when I hover over
   them" in Settings > Bluetooth & devices > Mouse (Windows 10: Settings > Devices > Mouse; on by
   default). The overlay never takes focus

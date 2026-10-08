@@ -151,6 +151,12 @@ impl OverlayApp {
         }
     }
 
+    /// Whether the game itself is running (not just its launcher).
+    #[cfg(target_os = "linux")]
+    pub fn game_running(&self) -> bool {
+        self.session.running
+    }
+
     /// Called when the game's state changes, whether or not the overlay is open.
     pub fn on_session(&mut self, session: Session) {
         // The mods can arrive after the map (the RPT is written later), and they decide which
@@ -242,15 +248,29 @@ impl OverlayApp {
             self.map_view(ui, index, screen);
         }
         self.toolbar(&ctx);
-        // Without the game folder it asks for it, until closed while a map is installed.
-        let game_missing = crate::paths::current().game.is_none();
-        if self.show_maps_window
-            || self.maps.is_empty()
-            || (game_missing && !self.maps_window_dismissed)
-        {
+        if self.maps_window_shown() {
             self.maps_window(&ctx);
         }
         self.tiles.end_frame();
+    }
+
+    /// Whether the Maps window is up: asked for, or needed (no maps; or no game folder, until
+    /// closed while a map is installed).
+    fn maps_window_shown(&mut self) -> bool {
+        let game_missing = crate::paths::current().game.is_none();
+        if !game_missing {
+            // Asks again if the game goes missing later (a library drive unplugged).
+            self.maps_window_dismissed = false;
+        }
+        self.show_maps_window
+            || self.maps.is_empty()
+            || (game_missing && !self.maps_window_dismissed)
+    }
+
+    /// Closes the Maps window, for good if it opened by itself.
+    fn close_maps_window(&mut self) {
+        self.show_maps_window = false;
+        self.maps_window_dismissed = crate::paths::current().game.is_none();
     }
 
     /// Opens the system folder picker. The overlay closes meanwhile (it would cover the dialog)
@@ -638,11 +658,13 @@ impl OverlayApp {
                         {
                             self.views.remove(&self.maps[i].meta.id);
                         }
-                        if ui
-                            .selectable_label(self.show_maps_window, "Maps…")
-                            .clicked()
-                        {
-                            self.show_maps_window = !self.show_maps_window;
+                        let shown = self.maps_window_shown();
+                        if ui.selectable_label(shown, "Maps…").clicked() {
+                            if shown {
+                                self.close_maps_window();
+                            } else {
+                                self.show_maps_window = true;
+                            }
                         }
                         ui.label(
                             egui::RichText::new(format!(
@@ -804,8 +826,7 @@ impl OverlayApp {
             });
         });
         if !open {
-            self.show_maps_window = false;
-            self.maps_window_dismissed = true;
+            self.close_maps_window();
         }
         if let Some(id) = view {
             self.select(&id);

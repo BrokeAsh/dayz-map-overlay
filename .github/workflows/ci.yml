@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# The jobs run every dependency's build script; they only need to read the code.
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-22.04

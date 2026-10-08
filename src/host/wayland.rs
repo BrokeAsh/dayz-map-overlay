@@ -239,6 +239,11 @@ impl Host {
                 }
             }
             HostEvent::Command(Command::Quit) => self.exit = true,
+            // The launcher's window has the game's class too (Proton names every window of the
+            // app alike), so typing M there mustn't open the map.
+            HostEvent::Hotkey(_) if self.overlay.is_none() && !self.app.game_running() => {
+                log::info!("hotkey ignored: DayZ itself isn't running (the launcher?)");
+            }
             HostEvent::Hotkey(spot) => {
                 if spot.is_some() {
                     self.game_spot = spot;
