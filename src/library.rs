@@ -190,7 +190,7 @@ impl Worker {
     }
 
     /// Returns whether that settled it: the map is ready and up to date, or there's nothing
-    /// more to try (no files, but a picture is installed).
+    /// more to try (no files, but an imported picture).
     fn ensure(&self, world: &str, mods: &[String]) -> bool {
         let mut catalog = self.catalog();
         // A newly downloaded mod: maybe this map, or another copy of it that the server uses.
@@ -199,7 +199,11 @@ impl Worker {
         }
         let Some(source) = catalog.best(world, mods).map(|s| self.fresh(s, mods)) else {
             log::warn!("no map files found for {world}");
-            let installed = maps::load(&maps::maps_dir().join(world)).is_ok();
+            let installed = maps::load(&maps::maps_dir().join(world)).ok();
+            // Only a picture the user imported is final; an old import is checked again when
+            // the files turn up (the game folder picked, say).
+            let settled = installed.as_ref().is_some_and(|p| p.meta.format == 0);
+            let installed = installed.is_some();
             self.update(|s| {
                 if installed {
                     s.ready = Some(world.to_string());
@@ -209,7 +213,7 @@ impl Worker {
                     ));
                 }
             });
-            return installed;
+            return settled;
         };
         match maps::load(&maps::maps_dir().join(&source.id)) {
             Ok(mut pack) if source.is_current(&pack) => {

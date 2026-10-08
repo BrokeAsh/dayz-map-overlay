@@ -11,7 +11,7 @@ use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
+    self, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -89,6 +89,9 @@ pub fn spawn(
 struct Listener {
     conn: RustConnection,
     root: Window,
+    keysym: u32,
+    /// The hotkey as configured, for messages.
+    name: String,
     hotkey: Vec<u32>,
     /// Modifier bits that stop the hotkey (Ctrl, Alt, Super).
     blocking: u16,
@@ -105,19 +108,7 @@ impl Listener {
             .context("XInput2 is not available")?;
         log::debug!("XInput {}.{}", version.major_version, version.minor_version);
 
-        let keycodes = Keycodes::load(&conn)?;
-        let hotkey = keycodes.find(keysym);
-        log::debug!("hotkey keycodes {hotkey:?}");
-        if hotkey.is_empty() {
-            bail!("no key on the keyboard produces {name:?}");
-        }
-        // Ctrl, Alt and Super combinations are left alone; Shift is allowed (it's sprint in
-        // DayZ).
-        let blocking: Vec<u32> = [0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03]
-            .into_iter()
-            .flat_map(|k| keycodes.find(k))
-            .collect();
-        let blocking = modifier_mask(&conn, &blocking)?;
+        let (hotkey, blocking) = keys(&conn, keysym, name)?;
 
         conn.xinput_xi_select_events(
             root,
@@ -138,6 +129,8 @@ impl Listener {
         Ok(Self {
             conn,
             root,
+            keysym,
+            name: name.to_string(),
             hotkey,
             blocking,
             atoms,
@@ -154,11 +147,15 @@ impl Listener {
         let Self {
             conn,
             root,
+            keysym,
+            name,
             hotkey,
             blocking,
             atoms,
         } = self;
-        let (root, blocking) = (*root, *blocking);
+        let (root, keysym) = (*root, *keysym);
+        // Updated when the keyboard layout changes (the hotkey's letter may move).
+        let (mut hotkey, mut blocking) = (hotkey.clone(), *blocking);
         let mut game_focused = matches(&atoms.active_window(conn, root).0);
         loop {
             let event = match conn.wait_for_event() {
@@ -207,6 +204,13 @@ impl Listener {
                         }));
                     }
                 }
+                Event::MappingNotify(e) if e.request != xproto::Mapping::POINTER => {
+                    match keys(conn, keysym, name) {
+                        Ok(keys) => (hotkey, blocking) = keys,
+                        // Keep the old keys: the new layout may lack the letter for now.
+                        Err(e) => log::warn!("keyboard layout changed: {e:#}"),
+                    }
+                }
                 Event::PropertyNotify(e) if e.atom == atoms.active_window => {
                     let focused = matches(&atoms.active_window(conn, root).0);
                     if game_focused && !focused {
@@ -218,6 +222,23 @@ impl Listener {
             }
         }
     }
+}
+
+/// The keycodes that type `keysym` in the current layout, and the modifier bits that stop the
+/// hotkey.
+fn keys(conn: &RustConnection, keysym: u32, name: &str) -> Result<(Vec<u32>, u16)> {
+    let keycodes = Keycodes::load(conn)?;
+    let hotkey = keycodes.find(keysym);
+    log::debug!("hotkey keycodes {hotkey:?}");
+    if hotkey.is_empty() {
+        bail!("no key on the keyboard produces {name:?}");
+    }
+    // Ctrl, Alt and Super combinations are left alone; Shift is allowed (it's sprint in DayZ).
+    let blocking: Vec<u32> = [0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03]
+        .into_iter()
+        .flat_map(|k| keycodes.find(k))
+        .collect();
+    Ok((hotkey, modifier_mask(conn, &blocking)?))
 }
 
 /// The name of the monitor (RandR 1.5) containing a point.

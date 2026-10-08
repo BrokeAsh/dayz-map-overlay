@@ -6,7 +6,7 @@
 //! game can't be found.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::steam;
@@ -29,31 +29,63 @@ pub struct Located {
     pub how: &'static str,
 }
 
-static CURRENT: RwLock<Option<Arc<Paths>>> = RwLock::new(None);
-/// The settings they were found with: a folder the user just picked counts even if saving it
-/// to the config file failed.
-static SETTINGS: RwLock<Option<Config>> = RwLock::new(None);
+/// The paths found most recently.
+struct Found {
+    paths: Option<Arc<Paths>>,
+    /// The game folder last given to [`refresh`] (one the user picked counts even if saving it
+    /// to the config file failed).
+    game_dir: Option<PathBuf>,
+    /// Bumped by [`refresh`], so a lookup started before it can't replace its paths.
+    revision: u64,
+}
+
+static FOUND: Mutex<Found> = Mutex::new(Found {
+    paths: None,
+    game_dir: None,
+    revision: 0,
+});
 
 /// The paths found most recently (looked up from the saved config the first time).
 pub fn current() -> Arc<Paths> {
-    if let Some(paths) = CURRENT.read().unwrap().clone() {
+    if let Some(paths) = FOUND.lock().unwrap().paths.clone() {
         return paths;
     }
-    refresh(&Config::load())
+    rediscover()
 }
 
-/// Looks everything up again, for example after the user picks the game folder.
+/// Looks everything up again with these settings, for example after the user picks the game
+/// folder.
 pub fn refresh(config: &Config) -> Arc<Paths> {
     let paths = Arc::new(locate(config));
-    *SETTINGS.write().unwrap() = Some(config.clone());
-    *CURRENT.write().unwrap() = Some(paths.clone());
+    let mut found = FOUND.lock().unwrap();
+    found.revision += 1;
+    found.game_dir = config.game_dir.clone();
+    found.paths = Some(paths.clone());
     paths
 }
 
-/// Looks everything up again with the same settings (Steam may have made a folder since).
+/// Looks everything up again (Steam may have made a folder since), with the config file as it
+/// is now.
 pub fn rediscover() -> Arc<Paths> {
-    let settings = SETTINGS.read().unwrap().clone();
-    refresh(&settings.unwrap_or_else(Config::load))
+    let (picked, revision) = {
+        let found = FOUND.lock().unwrap();
+        (found.game_dir.clone(), found.revision)
+    };
+    let mut config = Config::load();
+    if config.game_dir.as_deref().is_none_or(|d| !is_game_dir(d)) && picked.is_some() {
+        config.game_dir = picked;
+    }
+    // Looked up without holding the lock: it reads Steam's files.
+    let paths = Arc::new(locate(&config));
+    let mut found = FOUND.lock().unwrap();
+    if found.revision != revision
+        && let Some(newer) = &found.paths
+    {
+        // New settings arrived meanwhile; theirs win.
+        return newer.clone();
+    }
+    found.paths = Some(paths.clone());
+    paths
 }
 
 /// True for a DayZ install folder.
