@@ -433,36 +433,51 @@ fn import(config: &Config, worlds: &[String], all: bool) -> Result<()> {
     if selected.is_empty() {
         anyhow::bail!("name the maps to import, or pass --all");
     }
+    // One damaged map mod mustn't stop the rest.
+    let mut failed = Vec::new();
     for world in &selected {
-        let start = std::time::Instant::now();
-        if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
-            && world.is_current(&pack)
-        {
-            import::refresh_pois(world, &mut pack)?;
-            println!(
-                "{} is up to date; rebuilt its points of interest in {:.0?}",
-                world.name,
-                start.elapsed()
-            );
-            continue;
+        if let Err(e) = import_one(world) {
+            eprintln!();
+            eprintln!("{}: {e:#}", world.name);
+            failed.push(world.name.clone());
         }
-        let last = std::sync::Mutex::new(101);
-        let pack = import::import_world(world, &|p| {
-            let percent = p.done * 100 / p.total;
-            let mut last = last.lock().unwrap();
-            if percent != *last {
-                *last = percent;
-                eprint!("\r{}: {percent:3}%", world.name);
-            }
-        })?;
-        eprintln!();
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("couldn't import {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+/// Imports one world, or only rebuilds its points of interest if its tiles are up to date.
+fn import_one(world: &import::catalog::WorldSource) -> Result<()> {
+    let start = std::time::Instant::now();
+    if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
+        && world.is_current(&pack)
+    {
+        import::refresh_pois(world, &mut pack)?;
         println!(
-            "Imported {} into {} in {:.0?}",
+            "{} is up to date; rebuilt its points of interest in {:.0?}",
             world.name,
-            pack.dir.display(),
             start.elapsed()
         );
+        return Ok(());
     }
+    let last = std::sync::Mutex::new(101);
+    let pack = import::import_world(world, &|p| {
+        let percent = p.done * 100 / p.total;
+        let mut last = last.lock().unwrap();
+        if percent != *last {
+            *last = percent;
+            eprint!("\r{}: {percent:3}%", world.name);
+        }
+    })?;
+    eprintln!();
+    println!(
+        "Imported {} into {} in {:.0?}",
+        world.name,
+        pack.dir.display(),
+        start.elapsed()
+    );
     Ok(())
 }
 

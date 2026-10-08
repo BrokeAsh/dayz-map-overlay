@@ -83,8 +83,9 @@ pub struct OverlayApp {
     pois: HashMap<String, Arc<LoadedPois>>,
     library: Library,
     seen_generation: u64,
-    /// When the maps were last read, to notice imports made by another program.
-    maps_read: std::time::SystemTime,
+    /// Each map.toml's time and size when the maps were last read, to notice imports made by
+    /// another program.
+    maps_read: Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     /// When the overlay last looked for those, while open.
     maps_checked: Instant,
     session: Session,
@@ -111,7 +112,7 @@ impl OverlayApp {
             pois: HashMap::new(),
             library,
             seen_generation: 0,
-            maps_read: std::time::SystemTime::now(),
+            maps_read: Vec::new(),
             maps_checked: Instant::now(),
             session: Session::default(),
             show_maps_window: false,
@@ -128,7 +129,8 @@ impl OverlayApp {
             self.current
                 .map(|i| self.maps[i].meta.id.clone())
                 .or(self.config.view.map.clone());
-        self.maps_read = std::time::SystemTime::now();
+        // Before reading them: a file saved in between then counts as changed next time.
+        self.maps_read = map_files();
         self.maps = maps::load_all();
         self.current = selected
             .and_then(|id| self.maps.iter().position(|m| m.meta.id == id))
@@ -195,16 +197,9 @@ impl OverlayApp {
         }
     }
 
-    /// Whether any map's `map.toml` was saved since the maps were read.
+    /// Whether any map's `map.toml` was saved, added or removed since the maps were read.
     fn maps_changed(&self) -> bool {
-        let Ok(entries) = std::fs::read_dir(maps::maps_dir()) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            std::fs::metadata(entry.path().join("map.toml"))
-                .and_then(|m| m.modified())
-                .is_ok_and(|t| t > self.maps_read)
-        })
+        map_files() != self.maps_read
     }
 
     pub fn on_hide(&mut self) {
@@ -1007,4 +1002,22 @@ fn paint_grid(painter: &egui::Painter, view: &View, screen: Rect, world: f64) {
             );
         }
     }
+}
+
+/// Every map.toml, with its modification time and size (`None` if it can't be read).
+fn map_files() -> Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)> {
+    let mut files: Vec<_> = std::fs::read_dir(maps::maps_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path().join("map.toml");
+            let stamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| Some((m.modified().ok()?, m.len())));
+            (path, stamp)
+        })
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }

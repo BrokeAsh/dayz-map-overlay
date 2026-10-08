@@ -102,6 +102,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     let pois = pois_json(source)?;
     let (layer, mut tiles_written) = build_layer(tiles, &layout, &dir, &generation, progress)?;
     let (pois_file, mut pois_written) = write_pois(&dir, &generation, &pois)?;
+    sync_tiles(&dir)?;
 
     let old = maps::load(&dir).ok().map(|p| p.meta);
     let meta = MapMeta {
@@ -481,9 +482,31 @@ pub fn save_tile(image: &RgbaImage, path: &Path) -> Result<()> {
     } else {
         image.write_with_encoder(image::codecs::png::PngEncoder::new(&mut file))?;
     }
-    // Dropping the writer would hide a failed final write (a full disk, say). Synced so that
-    // once map.toml points here, a crash can't leave the tile empty.
-    file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    // Dropping the writer would hide a failed final write (a full disk, say). (Synced to disk
+    // all at once, by `sync_tiles`.)
+    std::io::Write::flush(&mut file)?;
+    Ok(())
+}
+
+/// Waits until the tiles just written are on disk, so once map.toml points to them a crash
+/// can't leave them empty. One sync of the whole file system: thousands of single-file ones
+/// take seconds. (On Windows, NTFS writes them out within moments anyway, and flushing each
+/// file there is slow too.)
+fn sync_tiles(dir: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn syncfs(fd: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        let folder = std::fs::File::open(dir)?;
+        // SAFETY: a plain system call on a descriptor we own for the call's duration.
+        if unsafe { syncfs(folder.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("syncing the new tiles");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = dir;
     Ok(())
 }
 
@@ -564,6 +587,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         }
         current = downsample(&current);
     }
+    sync_tiles(&dir)?;
     let old = maps::load(&dir).ok().map(|p| p.meta);
     let mut meta = old.clone().unwrap_or_else(|| MapMeta {
         id: id.into(),

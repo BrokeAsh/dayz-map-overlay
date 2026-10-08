@@ -12,7 +12,8 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// Created with the first surface, once the output format is known.
     renderer: Option<(egui_wgpu::Renderer, wgpu::TextureFormat)>,
-    /// Set when the device is lost (a driver reset or update); nothing can draw after that.
+    /// Set when the device (a driver reset or update) or the surface is lost; nothing can draw
+    /// after that until the overlay restarts.
     lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -184,6 +185,14 @@ impl Gpu {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                free(renderer);
+                return Frame::Skipped;
+            }
+            // Reconfiguring can't bring it back; it needs a new surface, which the restart for a
+            // lost device makes.
+            wgpu::CurrentSurfaceTexture::Lost => {
+                log::error!("the window's GPU surface was lost");
+                self.lost.store(true, std::sync::atomic::Ordering::Relaxed);
                 free(renderer);
                 return Frame::Skipped;
             }

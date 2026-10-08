@@ -118,7 +118,15 @@ pub fn check_world_size(size: f64) -> Result<()> {
 impl MapMeta {
     /// Rejects values that would break drawing (a damaged or hand-edited `map.toml`).
     fn check(&self) -> Result<()> {
-        if !valid_id(&self.id) {
+        // Version 0.1 let pictures have any id (`Namalsk`); the folder is found by listing, so
+        // only a name that could reach outside it is refused. New imports use `valid_id`.
+        let id_ok = (1..=64).contains(&self.id.len())
+            && !matches!(self.id.as_str(), "." | "..")
+            && !self
+                .id
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'));
+        if !id_ok {
             anyhow::bail!("bad map id {:?}", self.id);
         }
         check_world_size(self.world_size)?;
@@ -234,12 +242,18 @@ fn generated(name: &str) -> bool {
             .and_then(|n| n.strip_suffix(".json"))
             .is_some_and(hex)
         || matches!(name, "satellite.importing" | "map.toml.stale")
+        // `write_atomic`'s temporary file, left by a crash.
+        || name
+            .strip_prefix("map.toml.")
+            .and_then(|n| n.strip_suffix(".tmp"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// After `new` was saved over `old`, deletes what `old` used and `new` doesn't, and leftovers of
-/// failed imports. Pictures go only when a new picture replaced them: one can't be rebuilt
-/// from the game's files, and nothing else here is touched. Best effort: what can't be deleted
-/// now (a tile being read) goes after a later import.
+/// After `new` was saved over `old`, deletes what `old` used and `new` doesn't, and generated
+/// leftovers of failed imports (see `generated`). Pictures go only when a new picture replaced
+/// them: one can't be rebuilt from the game's files. Anything else stays, including a picture
+/// folder nothing lists any more (a crashed `import-image`), which the user can delete.
+/// Best effort: a generated leftover that can't be deleted now goes after a later import.
 pub fn remove_unused(dir: &Path, old: Option<&MapMeta>, new: &MapMeta) {
     let keep: Vec<&str> = used(new).collect();
     let new_picture = new.layers.iter().any(|l| l.id == "picture");
