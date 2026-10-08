@@ -80,17 +80,40 @@ pub fn parse(data: &[u8]) -> Result<Class> {
     if !data.starts_with(b"\0raP") {
         bail!("not a rapified config");
     }
-    let mut reader = Reader { data, depth: 0 };
+    let mut reader = Reader {
+        data,
+        depth: 0,
+        budget: std::cell::Cell::new(data.len() * 2 + 64),
+        bodies: Default::default(),
+    };
     reader.class_body(16)
 }
 
 struct Reader<'a> {
     data: &'a [u8],
     depth: usize,
+    /// Bytes left to read (entries count one more). A real config reads each byte once; a crafted
+    /// one whose classes overlap (sharing bodies, or starting inside a long string) would
+    /// otherwise reread and copy the same bytes until memory runs out.
+    budget: std::cell::Cell<usize>,
+    /// Class bodies already read. Real configs give each class its own; a crafted one could
+    /// point many classes at one body and multiply the work and memory.
+    bodies: std::collections::HashSet<usize>,
 }
 
 impl Reader<'_> {
+    fn charge(&self, bytes: usize) -> Result<()> {
+        let left = self
+            .budget
+            .get()
+            .checked_sub(bytes)
+            .ok_or_else(|| anyhow::anyhow!("config refers to its own contents in a loop"))?;
+        self.budget.set(left);
+        Ok(())
+    }
+
     fn byte(&self, i: &mut usize) -> Result<u8> {
+        self.charge(1)?;
         let b = *self
             .data
             .get(*i)
@@ -100,6 +123,7 @@ impl Reader<'_> {
     }
 
     fn u32(&self, i: &mut usize) -> Result<u32> {
+        self.charge(4)?;
         let bytes = self
             .data
             .get(*i..*i + 4)
@@ -126,6 +150,7 @@ impl Reader<'_> {
             .iter()
             .position(|&b| b == 0)
             .ok_or_else(|| anyhow::anyhow!("unterminated string"))?;
+        self.charge(len + 1)?;
         *i += len + 1;
         Ok(String::from_utf8_lossy(&rest[..len]).into_owned())
     }
@@ -139,10 +164,24 @@ impl Reader<'_> {
         })
     }
 
-    fn array(&self, i: &mut usize) -> Result<Vec<Value>> {
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > 64 {
+            bail!("config nesting is too deep");
+        }
+        Ok(())
+    }
+
+    fn spend(&mut self) -> Result<()> {
+        self.charge(1)
+    }
+
+    fn array(&mut self, i: &mut usize) -> Result<Vec<Value>> {
+        self.enter()?;
         let count = self.compressed(i)?;
         let mut items = Vec::with_capacity(count.min(4096));
         for _ in 0..count {
+            self.spend()?;
             let kind = self.byte(i)?;
             items.push(if kind == 3 {
                 Value::Array(self.array(i)?)
@@ -150,19 +189,21 @@ impl Reader<'_> {
                 self.scalar(kind, i)?
             });
         }
+        self.depth -= 1;
         Ok(items)
     }
 
     fn class_body(&mut self, offset: usize) -> Result<Class> {
-        self.depth += 1;
-        if self.depth > 64 {
-            bail!("config nesting is too deep");
+        if !self.bodies.insert(offset) {
+            bail!("config classes share a body");
         }
+        self.enter()?;
         let mut i = offset;
         let _parent = self.string(&mut i)?;
         let count = self.compressed(&mut i)?;
         let mut class = Class::default();
         for _ in 0..count {
+            self.spend()?;
             match self.byte(&mut i)? {
                 0 => {
                     let name = self.string(&mut i)?;
@@ -201,5 +242,33 @@ impl Reader<'_> {
         }
         self.depth -= 1;
         Ok(class)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    /// Many classes whose bodies start at different points inside one long string: each reads
+    /// a suffix of it as its parent name. That must hit the budget, not use gigabytes.
+    #[test]
+    fn overlapping_classes_are_rejected() {
+        let children = 4000u32;
+        let mut data = b"\0raP".to_vec();
+        data.resize(16, 0);
+        data.push(0); // root's parent name
+        data.extend([0xa0, 0x1f]); // 4000 entries (compressed integer)
+        let entries_end = data.len() + children as usize * 7;
+        for k in 0..children {
+            data.extend([0, b'c', 0]); // class entry named "c", then its body's offset
+            data.extend((entries_end as u32 + k).to_le_bytes());
+        }
+        assert_eq!(data.len(), entries_end);
+        data.extend(std::iter::repeat_n(b'A', children as usize));
+        data.extend([0, 0]); // end of the string, then an empty entry count
+        let start = std::time::Instant::now();
+        let error = parse(&data).unwrap_err().to_string();
+        assert!(error.contains("loop"), "{error}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 }

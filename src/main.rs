@@ -40,6 +40,9 @@ enum Cmd {
         /// Open the overlay immediately (useful for testing).
         #[arg(long)]
         show: bool,
+        /// Started again after losing the graphics device: keep the log that says why.
+        #[arg(long, hide = true)]
+        restarted: bool,
     },
     /// Show or hide the running overlay.
     Toggle,
@@ -83,24 +86,52 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
-    // stopping is what command-line tools do.
-    #[cfg(target_os = "linux")]
-    // SAFETY: called before any other threads exist.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Cmd::Run { show: false });
-    let console = !matches!(command, Cmd::Run { .. }) || keep_console();
+    let command = cli.command.unwrap_or(Cmd::Run {
+        show: false,
+        restarted: false,
+    });
+    if let Cmd::Run {
+        restarted: true, ..
+    } = command
+    {
+        KEEP_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let overlay = matches!(command, Cmd::Run { .. });
+    // Rust ignores SIGPIPE, so `dayz-map status | head` would panic when `head` exits; quietly
+    // stopping is what command-line tools do. The overlay keeps ignoring it, so a closed log
+    // pipe can't kill it.
+    #[cfg(target_os = "linux")]
+    if !overlay {
+        // SAFETY: called before any other threads exist.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+    let console = !overlay || keep_console();
     let mut logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if !console && let Some(file) = log_file() {
-        logger.target(env_logger::Target::Pipe(Box::new(file)));
+    let logging_to_file = !console && open_log_file();
+    if logging_to_file {
+        logger.target(env_logger::Target::Pipe(Box::new(LogFile)));
+        // Without a console, panics and errors would otherwise vanish.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("{info}");
+            default_hook(info);
+        }));
     }
     logger.init();
+    let result = run(command);
+    if logging_to_file && let Err(e) = &result {
+        log::error!("{e:#}");
+    }
+    result
+}
+
+fn run(command: Cmd) -> Result<()> {
     match command {
-        Cmd::Run { show } => host::run(Config::load(), show),
+        Cmd::Run { show, restarted } => host::run(Config::load(), show, restarted),
         Cmd::Toggle => ipc::send(ipc::Command::Toggle),
         Cmd::Show => ipc::send(ipc::Command::Show),
         Cmd::Hide => ipc::send(ipc::Command::Hide),
@@ -149,10 +180,50 @@ fn keep_console() -> bool {
 }
 
 /// Where the log goes without a console: `dayz-map.log` in the data folder (Windows).
-fn log_file() -> Option<std::fs::File> {
+static LOG_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// Opens the log for appending, so a second copy that finds the overlay already running
+/// doesn't wipe the running one's log.
+fn open_log_file() -> bool {
     let dir = config::data_dir();
-    std::fs::create_dir_all(&dir).ok()?;
-    std::fs::File::create(dir.join("dayz-map.log")).ok()
+    let file = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log_path())
+    });
+    file.is_ok_and(|file| LOG_FILE.set(file).is_ok())
+}
+
+fn log_path() -> PathBuf {
+    config::data_dir().join("dayz-map.log")
+}
+
+/// Set for a restart, whose log should continue the previous run's.
+static KEEP_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Starts the log over; called once this is known to be the only overlay running. (Through a
+/// second handle: Windows can't truncate through an append-only one. Appends then continue
+/// from the new end.)
+pub fn fresh_log() {
+    if LOG_FILE.get().is_some() && !KEEP_LOG.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(log_path())
+            .and_then(|file| file.set_len(0));
+    }
+}
+
+struct LogFile;
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        LOG_FILE.get().expect("log file is open").write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        LOG_FILE.get().expect("log file is open").flush()
+    }
 }
 
 #[cfg(windows)]
@@ -165,7 +236,16 @@ const RUN_VALUE: &str = "DayZ Map Overlay";
 fn autostart(on: bool) -> Result<()> {
     use win::{HKEY_CURRENT_USER, delete_registry_value, set_registry_string};
     if on {
-        let exe = std::env::current_exe()?;
+        let exe = steam::real_path(&std::env::current_exe()?);
+        // Running straight from the zip, Explorer extracts to a temporary folder that's
+        // cleaned up later, which would leave the sign-in entry pointing at nothing.
+        if exe.starts_with(steam::real_path(&std::env::temp_dir())) {
+            anyhow::bail!(
+                "{} is in a temporary folder; extract the zip to a folder that will stay, \
+                 then run `dayz-map autostart on` from there",
+                exe.display()
+            );
+        }
         let command = format!("\"{}\" run", exe.display());
         set_registry_string(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, &command)
             .context("writing the sign-in entry")?;
@@ -179,6 +259,27 @@ fn autostart(on: bool) -> Result<()> {
 }
 
 /// Adds or removes a login entry (`~/.config/autostart`) that runs this binary.
+/// One argument for a desktop entry's `Exec=`, quoted. Two layers: inside the quotes, `"`,
+/// `` ` ``, `$` and `\` take a backslash; then the key is a string value, whose own escapes
+/// double every backslash. A literal `%` is `%%`.
+#[cfg(not(windows))]
+fn desktop_exec_arg(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => out.extend(['\\', '\\', c]),
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(not(windows))]
 fn autostart(on: bool) -> Result<()> {
     let dirs = directories::BaseDirs::new().context("no home directory")?;
@@ -192,18 +293,10 @@ fn autostart(on: bool) -> Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?.canonicalize()?;
-    // Desktop entries quote arguments with double quotes and escape `"`, `` ` ``, `$` and `\`.
-    let quoted: String = exe
-        .to_string_lossy()
-        .chars()
-        .flat_map(|c| {
-            let escape = matches!(c, '"' | '`' | '$' | '\\');
-            escape.then_some('\\').into_iter().chain([c])
-        })
-        .collect();
+    let quoted = desktop_exec_arg(&exe.to_string_lossy());
     let text = format!(
         "[Desktop Entry]\nType=Application\nName=DayZ Map Overlay\n\
-         Comment=Press M in DayZ to open a see-through map\nExec=\"{quoted}\" run\n\
+         Comment=Press M in DayZ to open a see-through map\nExec={quoted} run\n\
          Icon=map-flat\nTerminal=false\nNoDisplay=true\nX-KDE-autostart-phase=2\n"
     );
     std::fs::create_dir_all(entry.parent().unwrap())?;
@@ -340,35 +433,69 @@ fn import(config: &Config, worlds: &[String], all: bool) -> Result<()> {
     if selected.is_empty() {
         anyhow::bail!("name the maps to import, or pass --all");
     }
+    // One damaged map mod mustn't stop the rest.
+    let mut failed = Vec::new();
     for world in &selected {
-        let start = std::time::Instant::now();
-        if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
-            && pack.meta.source == world.fingerprint()
-        {
-            import::refresh_pois(world, &mut pack)?;
-            println!(
-                "{} is up to date; rebuilt its points of interest in {:.0?}",
-                world.name,
-                start.elapsed()
-            );
-            continue;
+        if let Err(e) = import_one(world) {
+            eprintln!();
+            eprintln!("{}: {e:#}", world.name);
+            failed.push(world.name.clone());
         }
-        let last = std::sync::Mutex::new(101);
-        let pack = import::import_world(world, &|p| {
-            let percent = p.done * 100 / p.total;
-            let mut last = last.lock().unwrap();
-            if percent != *last {
-                *last = percent;
-                eprint!("\r{}: {percent:3}%", world.name);
-            }
-        })?;
-        eprintln!();
-        println!(
-            "Imported {} into {} in {:.0?}",
-            world.name,
-            pack.dir.display(),
-            start.elapsed()
-        );
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("couldn't import {}", failed.join(", "));
     }
     Ok(())
+}
+
+/// Imports one world, or only rebuilds its points of interest if its tiles are up to date.
+fn import_one(world: &import::catalog::WorldSource) -> Result<()> {
+    let start = std::time::Instant::now();
+    if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
+        && world.is_current(&pack)
+    {
+        if pack.meta.pois_source == world.pois_fingerprint() {
+            println!("{} is up to date", world.name);
+            return Ok(());
+        }
+        if !import::refresh_pois(world, &mut pack)? {
+            println!("{} is up to date", world.name);
+            return Ok(());
+        }
+        println!(
+            "{} is up to date; rebuilt its points of interest in {:.0?}",
+            world.name,
+            start.elapsed()
+        );
+        return Ok(());
+    }
+    let last = std::sync::Mutex::new(101);
+    let pack = import::import_world(world, &|p| {
+        let percent = p.done * 100 / p.total;
+        let mut last = last.lock().unwrap();
+        if percent != *last {
+            *last = percent;
+            eprint!("\r{}: {percent:3}%", world.name);
+        }
+    })?;
+    eprintln!();
+    println!(
+        "Imported {} into {} in {:.0?}",
+        world.name,
+        pack.dir.display(),
+        start.elapsed()
+    );
+    Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    #[test]
+    fn desktop_exec_quoting() {
+        assert_eq!(
+            super::desktop_exec_arg("/home/a/100% \"ready\"/dayz-map"),
+            r#""/home/a/100%% \\"ready\\"/dayz-map""#
+        );
+        assert_eq!(super::desktop_exec_arg(r"/a\b$c"), r#""/a\\\\b\\$c""#);
+    }
 }

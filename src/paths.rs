@@ -6,7 +6,7 @@
 //! game can't be found.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::steam;
@@ -29,20 +29,62 @@ pub struct Located {
     pub how: &'static str,
 }
 
-static CURRENT: RwLock<Option<Arc<Paths>>> = RwLock::new(None);
+/// The paths found most recently.
+struct Found {
+    paths: Option<Arc<Paths>>,
+    /// The game folder last given to [`refresh`] (one the user picked counts even if saving it
+    /// to the config file failed).
+    game_dir: Option<PathBuf>,
+    /// Bumped by [`refresh`], so a lookup started before it can't replace its paths.
+    revision: u64,
+}
+
+static FOUND: Mutex<Found> = Mutex::new(Found {
+    paths: None,
+    game_dir: None,
+    revision: 0,
+});
 
 /// The paths found most recently (looked up from the saved config the first time).
 pub fn current() -> Arc<Paths> {
-    if let Some(paths) = CURRENT.read().unwrap().clone() {
+    if let Some(paths) = FOUND.lock().unwrap().paths.clone() {
         return paths;
     }
-    refresh(&Config::load())
+    rediscover()
 }
 
-/// Looks everything up again, for example after the user picks the game folder.
+/// Looks everything up again with these settings, for example after the user picks the game
+/// folder.
 pub fn refresh(config: &Config) -> Arc<Paths> {
     let paths = Arc::new(locate(config));
-    *CURRENT.write().unwrap() = Some(paths.clone());
+    let mut found = FOUND.lock().unwrap();
+    found.revision += 1;
+    found.game_dir = config.game_dir.clone();
+    found.paths = Some(paths.clone());
+    paths
+}
+
+/// Looks everything up again (Steam may have made a folder since), with the config file as it
+/// is now.
+pub fn rediscover() -> Arc<Paths> {
+    let (picked, revision) = {
+        let found = FOUND.lock().unwrap();
+        (found.game_dir.clone(), found.revision)
+    };
+    let mut config = Config::load();
+    if config.game_dir.as_deref().is_none_or(|d| !is_game_dir(d)) && picked.is_some() {
+        config.game_dir = picked;
+    }
+    // Looked up without holding the lock: it reads Steam's files.
+    let paths = Arc::new(locate(&config));
+    let mut found = FOUND.lock().unwrap();
+    if found.revision != revision
+        && let Some(newer) = &found.paths
+    {
+        // New settings arrived meanwhile; theirs win.
+        return newer.clone();
+    }
+    found.paths = Some(paths.clone());
     paths
 }
 
@@ -108,10 +150,17 @@ pub fn locate(config: &Config) -> Paths {
         how: "Steam library",
     })
     .collect();
-    if paths.workshop.is_empty()
-        && let Some(game) = &paths.game
-    {
-        paths.workshop = workshop_from_links(&game.path);
+    // Also where the game's links lead: a library Steam doesn't list (the game folder set by
+    // hand), even when a listed one has a Workshop folder too.
+    if let Some(game) = &paths.game {
+        let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
+        let listed: std::collections::HashSet<PathBuf> =
+            paths.workshop.iter().map(|w| real(&w.path)).collect();
+        paths.workshop.extend(
+            workshop_from_links(&game.path)
+                .into_iter()
+                .filter(|l| !listed.contains(&real(&l.path))),
+        );
     }
 
     paths.logs = log_dirs(config, &search, &mut paths.warnings);

@@ -13,8 +13,13 @@ const WORKERS: usize = 4;
 enum Slot {
     Pending,
     Missing,
+    /// Couldn't be read (another program had it open, say); tried again after a while.
+    Failed(std::time::Instant),
     Loaded(TextureHandle),
 }
+
+/// How long a tile that couldn't be read waits before another try.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct Entry {
     slot: Slot,
@@ -24,6 +29,7 @@ struct Entry {
 enum Loaded {
     Image(ColorImage),
     Missing,
+    Failed,
     /// No longer on screen by the time a worker got to it.
     Skipped,
 }
@@ -38,14 +44,17 @@ struct Wanted {
 pub struct TileCache {
     entries: HashMap<PathBuf, Entry>,
     frame: u64,
-    requests: Sender<PathBuf>,
-    results: Receiver<(PathBuf, Loaded)>,
+    requests: Sender<(u64, PathBuf)>,
+    results: Receiver<(u64, PathBuf, Loaded)>,
     wanted: Arc<Mutex<Wanted>>,
+    /// Bumped by `clear`, so loads requested before it (for a map since rebuilt) are dropped
+    /// instead of overwriting newer ones.
+    generation: u64,
 }
 
 impl TileCache {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (requests, request_rx) = crossbeam_channel::unbounded::<PathBuf>();
+        let (requests, request_rx) = crossbeam_channel::unbounded::<(u64, PathBuf)>();
         let (result_tx, results) = crossbeam_channel::unbounded();
         let wanted = Arc::new(Mutex::new(Wanted::default()));
         for i in 0..WORKERS {
@@ -58,7 +67,7 @@ impl TileCache {
             std::thread::Builder::new()
                 .name(format!("tiles-{i}"))
                 .spawn(move || {
-                    for path in rx {
+                    for (generation, path) in rx {
                         let still_wanted = {
                             let w = wanted.lock().unwrap();
                             w.current.contains(&path) || w.previous.contains(&path)
@@ -68,7 +77,7 @@ impl TileCache {
                         } else {
                             Loaded::Skipped
                         };
-                        if tx.send((path, loaded)).is_err() {
+                        if tx.send((generation, path, loaded)).is_err() {
                             break;
                         }
                         ctx.request_repaint();
@@ -82,6 +91,7 @@ impl TileCache {
             requests,
             results,
             wanted,
+            generation: 0,
         }
     }
 
@@ -93,7 +103,10 @@ impl TileCache {
             std::mem::swap(&mut w.previous, &mut w.current);
             w.current.clear();
         }
-        for (path, loaded) in self.results.try_iter() {
+        for (generation, path, loaded) in self.results.try_iter() {
+            if generation != self.generation {
+                continue;
+            }
             match loaded {
                 Loaded::Image(image) => {
                     let name = path.to_string_lossy();
@@ -105,6 +118,11 @@ impl TileCache {
                 Loaded::Missing => {
                     if let Some(entry) = self.entries.get_mut(&path) {
                         entry.slot = Slot::Missing;
+                    }
+                }
+                Loaded::Failed => {
+                    if let Some(entry) = self.entries.get_mut(&path) {
+                        entry.slot = Slot::Failed(std::time::Instant::now());
                     }
                 }
                 Loaded::Skipped => {
@@ -120,16 +138,22 @@ impl TileCache {
         let frame = self.frame;
         self.wanted.lock().unwrap().current.insert(path.to_owned());
         let entry = self.entries.entry(path.to_owned()).or_insert_with(|| {
-            let _ = self.requests.send(path.to_owned());
+            let _ = self.requests.send((self.generation, path.to_owned()));
             Entry {
                 slot: Slot::Pending,
                 last_used: frame,
             }
         });
         entry.last_used = frame;
+        if let Slot::Failed(at) = entry.slot
+            && at.elapsed() >= RETRY
+        {
+            entry.slot = Slot::Pending;
+            let _ = self.requests.send((self.generation, path.to_owned()));
+        }
         match &entry.slot {
             Slot::Pending => None,
-            Slot::Missing => Some(None),
+            Slot::Missing | Slot::Failed(_) => Some(None),
             Slot::Loaded(texture) => Some(Some(texture.id())),
         }
     }
@@ -169,10 +193,18 @@ impl TileCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.generation += 1;
     }
 
     /// Drops every tile sharper than `max_level`, keeping the cheap overview levels warm.
     pub fn trim(&mut self, max_level: u32) {
+        // Nothing is on screen now: loads still queued are skipped rather than decoded and kept
+        // waiting until the overlay opens again.
+        {
+            let mut wanted = self.wanted.lock().unwrap();
+            wanted.current.clear();
+            wanted.previous.clear();
+        }
         self.entries.retain(|path, _| {
             let level = path
                 .parent()
@@ -188,6 +220,12 @@ fn load(path: &PathBuf) -> Loaded {
         Ok(image) => image.into_rgba8(),
         Err(image::ImageError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Loaded::Missing;
+        }
+        // A damaged tile (cut short included) stays missing; one that couldn't be read is tried
+        // again.
+        Err(image::ImageError::IoError(e)) if e.kind() != std::io::ErrorKind::UnexpectedEof => {
+            log::warn!("{}: {e}", path.display());
+            return Loaded::Failed;
         }
         Err(e) => {
             log::warn!("{}: {e}", path.display());

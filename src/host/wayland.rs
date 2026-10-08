@@ -1,6 +1,6 @@
 //! Shows the overlay as a full-screen layer-shell surface on the `overlay` layer, which the
-//! compositor draws above everything, fullscreen games included. While visible it takes the
-//! keyboard exclusively; hiding destroys the surface so focus returns to the game.
+//! compositor draws above everything, fullscreen games included. It never takes keyboard focus,
+//! so the game stays active underneath; the hotkey comes from XWayland (`crate::trigger`).
 
 use anyhow::{Context, Result};
 use egui_wgpu::wgpu;
@@ -42,13 +42,15 @@ use wayland_client::{
 };
 
 use super::HostEvent;
-use super::gpu::{Fade, Frame, Gpu, repaint_after};
+use super::gpu::{Fade, Frame, Gpu, repaint_after, repaint_in};
 use crate::config::Config;
 use crate::ipc::{self, Command};
 use crate::ui::OverlayApp;
 
 /// Ignore the hotkey this soon after closing, in case the game sees the closing key press.
 const REOPEN_GRACE: Duration = Duration::from_millis(400);
+/// How soon to try again when a frame couldn't be drawn.
+const SKIPPED_RETRY: Duration = Duration::from_millis(100);
 
 pub fn run(config: Config, show: bool) -> Result<()> {
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
@@ -70,7 +72,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let ipc_tx = tx.clone();
-    ipc::listen(move |command| {
+    let _control = ipc::listen(move |command| {
         let _ = ipc_tx.send(HostEvent::Command(command));
     })?;
 
@@ -78,8 +80,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
     let unfocus_tx = tx.clone();
     if let Err(e) = crate::trigger::spawn(
         &config,
-        move |center| {
-            let _ = hotkey_tx.send(HostEvent::Hotkey(center));
+        move |spot| {
+            let _ = hotkey_tx.send(HostEvent::Hotkey(spot));
         },
         move || {
             let _ = unfocus_tx.send(HostEvent::GameUnfocused);
@@ -137,8 +139,9 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         next_repaint: None,
         last_hide: Instant::now() - REOPEN_GRACE,
         fade: Fade::new(own_fade()),
-        game_center: None,
+        game_spot: None,
         exit: false,
+        restart: false,
     };
     if show {
         host.show();
@@ -146,9 +149,13 @@ pub fn run(config: Config, show: bool) -> Result<()> {
     log::info!("ready; press {hotkey} in DayZ to open the map");
 
     while !host.exit {
-        let timeout = host
+        let mut timeout = host
             .next_repaint
             .map(|t| t.saturating_duration_since(Instant::now()));
+        // A skipped frame has no frame callback coming to wake us; try again shortly.
+        if host.needs_redraw && host.overlay.as_ref().is_some_and(|o| !o.frame_pending) {
+            timeout = Some(timeout.map_or(SKIPPED_RETRY, |t| t.min(SKIPPED_RETRY)));
+        }
         event_loop.dispatch(timeout, &mut host)?;
         if host.next_repaint.is_some_and(|t| t <= Instant::now()) {
             host.next_repaint = None;
@@ -159,13 +166,19 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         }
     }
     host.hide();
-    ipc::cleanup();
+    if host.restart {
+        drop(host);
+        drop(_control);
+        super::restart();
+    }
     Ok(())
 }
 
 struct Overlay {
-    layer: LayerSurface,
+    /// Declared first, so it's dropped first: the GPU surface must go before the Wayland surface
+    /// it draws to, even when an error or panic skips `hide`.
     surface: Option<wgpu::Surface<'static>>,
+    layer: LayerSurface,
     /// Size in surface (logical) coordinates.
     width: u32,
     height: u32,
@@ -207,26 +220,33 @@ struct Host {
     last_hide: Instant,
     fade: Fade,
     /// Where the game window was last seen, to open the overlay on its monitor.
-    game_center: Option<(i32, i32)>,
+    game_spot: Option<crate::trigger::GameSpot>,
     exit: bool,
+    /// Start over when the loop ends (the graphics device was lost).
+    restart: bool,
 }
 
 impl Host {
     fn handle(&mut self, event: HostEvent) {
         match event {
-            HostEvent::Command(Command::Show) => self.show(),
+            HostEvent::Command(Command::Show) => self.show_by_command(),
             HostEvent::Command(Command::Hide) => self.hide(),
             HostEvent::Command(Command::Toggle) => {
                 if self.overlay.is_some() {
                     self.hide()
                 } else {
-                    self.show()
+                    self.show_by_command()
                 }
             }
             HostEvent::Command(Command::Quit) => self.exit = true,
-            HostEvent::Hotkey(center) => {
-                if center.is_some() {
-                    self.game_center = center;
+            // The launcher's window has the game's class too (Proton names every window of the
+            // app alike), so typing M there mustn't open the map.
+            HostEvent::Hotkey(_) if self.overlay.is_none() && !self.app.game_running() => {
+                log::info!("hotkey ignored: DayZ itself isn't running (the launcher?)");
+            }
+            HostEvent::Hotkey(spot) => {
+                if spot.is_some() {
+                    self.game_spot = spot;
                 }
                 if self.overlay.is_some() {
                     self.hide();
@@ -240,15 +260,23 @@ impl Host {
                 self.app.on_session(session);
                 self.needs_redraw = true;
             }
-            HostEvent::Repaint(delay) => {
-                if delay.is_zero() {
-                    self.needs_redraw = true;
-                } else if delay < Duration::from_secs(3600) {
-                    let at = Instant::now() + delay;
+            HostEvent::Repaint(delay) => match repaint_in(delay) {
+                Some(None) => self.needs_redraw = true,
+                Some(Some(at)) => {
                     self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
                 }
-            }
+                None => {}
+            },
         }
+    }
+
+    /// Opens for `dayz-map show` (a desktop shortcut, say). Where the game was at the last
+    /// hotkey press may be out of date, so the compositor picks: the monitor in use.
+    fn show_by_command(&mut self) {
+        if self.overlay.is_none() {
+            self.game_spot = None;
+        }
+        self.show();
     }
 
     fn show(&mut self) {
@@ -289,7 +317,18 @@ impl Host {
 
     /// The monitor showing the game window; `None` lets the compositor pick (the active one).
     fn game_output(&self) -> Option<wl_output::WlOutput> {
-        let (x, y) = self.game_center?;
+        let spot = self.game_spot.as_ref()?;
+        let info = |output: &wl_output::WlOutput| self.output_state.info(output);
+        if let Some(name) = &spot.monitor
+            && let Some(output) = self
+                .output_state
+                .outputs()
+                .find(|o| info(o).is_some_and(|i| i.name.as_ref() == Some(name)))
+        {
+            return Some(output);
+        }
+        // Positions only agree when XWayland isn't scaled.
+        let (x, y) = spot.center;
         self.output_state.outputs().find(|output| {
             let Some(info) = self.output_state.info(output) else {
                 return false;
@@ -308,7 +347,7 @@ impl Host {
         // The GPU surface must go before the Wayland surface it draws to.
         overlay.surface.take();
         drop(overlay);
-        self.events.clear();
+        self.events = super::release_pointer();
         self.pointer_pos = None;
         self.keyboard_focus = false;
         self.last_hide = Instant::now();
@@ -347,11 +386,14 @@ impl Host {
             }
         }
         let scale = overlay.scale.max(1) as u32;
-        gpu.configure(
+        if let Err(e) = gpu.configure(
             overlay.surface.as_ref().unwrap(),
             overlay.width * scale,
             overlay.height * scale,
-        );
+        ) {
+            log::error!("{e:#}");
+            return;
+        }
         overlay.layer.wl_surface().set_buffer_scale(overlay.scale);
         overlay.configured = true;
         self.needs_redraw = true;
@@ -361,6 +403,13 @@ impl Host {
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
+        // (Checked while shown, so the restarted overlay opens again only if this one was.)
+        if self.gpu.is_lost() {
+            self.hide();
+            self.restart = true;
+            self.exit = true;
+            return;
+        }
         if !overlay.configured || overlay.frame_pending {
             return;
         }

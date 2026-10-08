@@ -30,8 +30,15 @@ pub struct LibraryState {
 
 enum Request {
     Scan,
-    Ensure { world: String, mods: Vec<String> },
-    Import { id: String },
+    /// The game left its map: rescans stop checking it.
+    Forget,
+    Ensure {
+        world: String,
+        mods: Vec<String>,
+    },
+    Import {
+        id: String,
+    },
 }
 
 pub struct Library {
@@ -55,7 +62,8 @@ impl Library {
         Self { requests, state }
     }
 
-    /// Looks for the game again (after the user picked its folder) and rescans.
+    /// Looks for the game again (after the user picked its folder) and rescans, which also
+    /// checks the game's map again (it may not have been found before).
     pub fn relocate(&self, config: &crate::config::Config) {
         paths::refresh(config);
         self.rescan();
@@ -67,6 +75,11 @@ impl Library {
             world: world.to_lowercase(),
             mods: mods.to_vec(),
         });
+    }
+
+    /// The game is no longer on a map (main menu, or closed).
+    pub fn forget(&self) {
+        let _ = self.requests.send(Request::Forget);
     }
 
     pub fn rescan(&self) {
@@ -86,20 +99,50 @@ struct Worker {
 impl Worker {
     fn run(self, rx: Receiver<Request>) {
         let mut upgraded = false;
+        // The game's map (and the server's mods): a rescan checks it again.
+        let mut wanted = None;
         for request in rx {
-            match request {
-                Request::Scan => {
-                    self.scan();
-                    if !upgraded {
-                        upgraded = true;
-                        self.upgrade_old_imports();
-                    }
+            // A bug tripped by some mod's files mustn't stop the library for the whole session.
+            let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.handle(request, &mut upgraded, &mut wanted)
+            }));
+            if handled.is_err() {
+                wanted = None;
+                self.update(|s| {
+                    s.job = None;
+                    s.scanning = false;
+                    s.message = Some("Reading the map files failed; see the log.".into());
+                });
+            }
+        }
+    }
+
+    fn handle(
+        &self,
+        request: Request,
+        upgraded: &mut bool,
+        wanted: &mut Option<(String, Vec<String>)>,
+    ) {
+        match request {
+            Request::Scan => {
+                self.scan();
+                if !*upgraded {
+                    *upgraded = true;
+                    self.upgrade_old_imports();
                 }
-                Request::Ensure { world, mods } => self.ensure(&world, &mods),
-                Request::Import { id } => {
-                    if let Some(source) = self.catalog().best(&id, &[]) {
-                        self.import(&source, false);
-                    }
+                // Its files may have changed, or turned up, or become readable again.
+                if let Some((world, mods)) = wanted {
+                    self.ensure(world, mods, true);
+                }
+            }
+            Request::Forget => *wanted = None,
+            Request::Ensure { world, mods } => {
+                self.ensure(&world, &mods, false);
+                *wanted = Some((world, mods));
+            }
+            Request::Import { id } => {
+                if let Some(source) = self.catalog().best(&id, &[]) {
+                    self.import(&self.fresh(source, &[]), false);
                 }
             }
         }
@@ -113,7 +156,9 @@ impl Worker {
     fn scan(&self) -> Arc<Catalog> {
         self.update(|s| s.scanning = true);
         let start = std::time::Instant::now();
-        let catalog = Arc::new(catalog::scan(&catalog::roots(&paths::current())));
+        // Steam folders too: the Workshop folder appears with the first mod download.
+        let paths = paths::rediscover();
+        let catalog = Arc::new(catalog::scan(&catalog::roots(&paths)));
         log::info!(
             "found {} terrains in {:.1?}",
             catalog.unique().len(),
@@ -122,8 +167,20 @@ impl Worker {
         self.update(|s| {
             s.scanning = false;
             s.catalog = Some(catalog.clone());
+            // Also picks up maps another program installed (`dayz-map import-image`).
+            s.generation += 1;
         });
         catalog
+    }
+
+    /// `source`, rescanned if a mod update changed its files since the scan (the archive
+    /// offsets the scan recorded would be wrong).
+    fn fresh(&self, source: WorldSource, mods: &[String]) -> WorldSource {
+        if !source.changed_since_scan() {
+            return source;
+        }
+        log::info!("{} changed since the last scan; rescanning", source.name);
+        self.scan().best(&source.id, mods).unwrap_or(source)
     }
 
     fn catalog(&self) -> Arc<Catalog> {
@@ -131,18 +188,27 @@ impl Worker {
         existing.unwrap_or_else(|| self.scan())
     }
 
-    fn ensure(&self, world: &str, mods: &[String]) {
+    /// `again` after a rescan: the catalog is fresh, and the user may be looking at another map,
+    /// so the game's map is only shown again if it was rebuilt.
+    fn ensure(&self, world: &str, mods: &[String], again: bool) {
         let mut catalog = self.catalog();
-        if catalog.best(world, mods).is_none() {
-            // Maybe a newly downloaded mod.
+        // A newly downloaded mod: maybe this map, or another copy of it that the server uses.
+        if !again
+            && (catalog.best(world, mods).is_none()
+                || mods.iter().any(|m| !catalog.mods.contains(m)))
+        {
             catalog = self.scan();
         }
-        let Some(source) = catalog.best(world, mods) else {
+        let Some(source) = catalog.best(world, mods).map(|s| self.fresh(s, mods)) else {
             log::warn!("no map files found for {world}");
             let installed = maps::load(&maps::maps_dir().join(world)).is_ok();
             self.update(|s| {
                 if installed {
-                    s.ready = Some(world.to_string());
+                    if !again {
+                        s.ready = Some(world.to_string());
+                        // An earlier map's problem no longer applies.
+                        s.message = None;
+                    }
                 } else {
                     s.message = Some(format!(
                         "No map files for \"{world}\" were found in the game or Workshop folders."
@@ -152,11 +218,21 @@ impl Worker {
             return;
         };
         match maps::load(&maps::maps_dir().join(&source.id)) {
-            Ok(mut pack) if pack.meta.source == source.fingerprint() => {
+            Ok(mut pack) if source.is_current(&pack) => {
                 self.refresh_pois(&source, &mut pack);
-                self.update(|s| s.ready = Some(source.id.clone()));
+                if !again {
+                    self.update(|s| {
+                        s.ready = Some(source.id.clone());
+                        s.message = None;
+                    });
+                }
             }
-            _ => self.import(&source, true),
+            installed => {
+                // An installed picture still works if the terrain's own files don't.
+                if !self.import(&source, true) && installed.is_ok() && !again {
+                    self.update(|s| s.ready = Some(source.id.clone()));
+                }
+            }
         }
     }
 
@@ -167,12 +243,14 @@ impl Worker {
         }
         log::info!("updating the points of interest of {}", pack.meta.name);
         match import::refresh_pois(source, pack) {
-            Ok(()) => self.update(|s| s.generation += 1),
+            // Reloaded even if another import did it: the map on disk changed either way.
+            Ok(_) => self.update(|s| s.generation += 1),
             Err(e) => log::warn!("{}: {e:#}", pack.meta.name),
         }
     }
 
-    fn import(&self, source: &WorldSource, show: bool) {
+    /// Imports a world; returns whether it worked.
+    fn import(&self, source: &WorldSource, show: bool) -> bool {
         let job = |done, total| Job {
             id: source.id.clone(),
             name: source.name.clone(),
@@ -187,6 +265,7 @@ impl Worker {
             self.state.lock().unwrap().job = Some(job(p.done, p.total));
             self.ctx.request_repaint();
         });
+        let ok = result.is_ok();
         self.update(|s| {
             s.job = None;
             s.generation += 1;
@@ -202,6 +281,7 @@ impl Worker {
                 }
             }
         });
+        ok
     }
 
     /// Rebuilds maps imported by an older version (for example, before points of interest).
@@ -215,6 +295,7 @@ impl Worker {
             let Some(source) = catalog.best(&pack.meta.id, &mods) else {
                 continue;
             };
+            let source = self.fresh(source, &mods);
             if pack.meta.format < catalog::IMPORT_VERSION {
                 log::info!("updating {} to the current import format", pack.meta.name);
                 self.import(&source, false);

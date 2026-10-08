@@ -30,7 +30,7 @@ use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
 use super::HostEvent;
-use super::gpu::{Fade, Frame, Gpu, repaint_after};
+use super::gpu::{Fade, Frame, Gpu, repaint_after, repaint_in};
 use crate::config::Config;
 use crate::ipc::{self, Command};
 use crate::ui::OverlayApp;
@@ -41,6 +41,11 @@ const REOPEN_GRACE: Duration = Duration::from_millis(400);
 /// How often to check, while the map is open, that the game is still in front.
 const FOCUS_CHECK: Duration = Duration::from_millis(250);
 const FADE: Duration = Duration::from_millis(150);
+/// How soon to try again when Windows has nowhere to show a frame (the screen is off or locked).
+const SKIPPED_RETRY: Duration = Duration::from_millis(100);
+/// Longer than Windows' longest key-repeat delay (one second): a "press" of a key that's already
+/// down after this long is a new press whose release was missed (say, behind a UAC prompt).
+const REPEAT_WINDOW: Duration = Duration::from_millis(1100);
 
 pub fn run(config: Config, show: bool) -> Result<()> {
     let event_loop = EventLoop::<HostEvent>::with_user_event()
@@ -48,10 +53,11 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         .context("starting the window system")?;
     // Raw keyboard input while other windows are in front: the hotkey.
     event_loop.listen_device_events(DeviceEvents::Always);
+    win::stop_background_mouse();
     let proxy = event_loop.create_proxy();
 
     let ipc_proxy = proxy.clone();
-    ipc::listen(move |command| {
+    let _control = ipc::listen(move |command| {
         let _ = ipc_proxy.send_event(HostEvent::Command(command));
     })?;
     let session_proxy = proxy.clone();
@@ -99,7 +105,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         window: None,
         hotkey,
         patterns,
-        held: Default::default(),
+        hotkey_seen: None,
         visible: false,
         follow_focus: false,
         game: None,
@@ -107,6 +113,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         next_focus_check: Instant::now(),
         last_hide: Instant::now() - REOPEN_GRACE,
         fade: Fade::new(Some(FADE)),
+        outdated: 0,
+        restart: false,
         show_at_start: show,
         _proxy: proxy,
     };
@@ -115,7 +123,10 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         config.hotkey.to_uppercase()
     );
     event_loop.run_app(&mut host)?;
-    ipc::cleanup();
+    if host.restart {
+        drop(_control);
+        super::restart();
+    }
     Ok(())
 }
 
@@ -133,8 +144,8 @@ struct Host {
     window: Option<OverlayWindow>,
     hotkey: Option<PhysicalKey>,
     patterns: Vec<String>,
-    /// Keys down right now, to ignore key repeat.
-    held: std::collections::HashSet<PhysicalKey>,
+    /// When the hotkey was last pressed or repeated while held down, to ignore key repeat.
+    hotkey_seen: Option<Instant>,
     visible: bool,
     /// Close when the game stops being the front window (set when opened over the game).
     follow_focus: bool,
@@ -144,6 +155,10 @@ struct Host {
     next_focus_check: Instant,
     last_hide: Instant,
     fade: Fade,
+    /// Frames in a row that found the surface out of date.
+    outdated: u32,
+    /// Start over when the loop ends (the graphics device was lost).
+    restart: bool,
     show_at_start: bool,
     _proxy: EventLoopProxy<HostEvent>,
 }
@@ -180,7 +195,7 @@ impl Host {
             .create_surface(window.clone())
             .context("creating the GPU surface")?;
         let size = window.inner_size();
-        self.gpu.configure(&surface, size.width, size.height);
+        self.gpu.configure(&surface, size.width, size.height)?;
         let input = egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -198,8 +213,17 @@ impl Host {
         Ok(())
     }
 
-    fn matches_game(&self, description: &str) -> bool {
-        self.patterns.is_empty() || self.patterns.iter().any(|p| description.contains(p))
+    /// A pattern naming a program (`dayz_x64.exe`) matches only that program, not a window
+    /// title that mentions it (a browser page about a crash, say); others match either.
+    fn matches_game(&self, front: &win::Foreground) -> bool {
+        self.patterns.is_empty()
+            || self.patterns.iter().any(|p| {
+                if p.ends_with(".exe") {
+                    front.exe == *p
+                } else {
+                    front.description.contains(p)
+                }
+            })
     }
 
     fn show(&mut self, follow_focus: bool) {
@@ -212,22 +236,28 @@ impl Host {
         // Cover the monitor the game is on (or the front window's, or our own).
         let anchor = self
             .game
+            .filter(|&hwnd| win::is_window(hwnd))
             .or_else(|| win::foreground().map(|f| f.hwnd))
             .unwrap_or(overlay.hwnd);
         let Some(rect) = win::monitor_rect(anchor) else {
+            log::warn!("no monitor to show the overlay on");
             return;
         };
-        // SAFETY: positioning and showing our own window, without activating it.
-        unsafe {
-            SetWindowPos(
-                overlay.hwnd,
-                HWND_TOPMOST,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+        // SAFETY: positioning and showing our own window, without activating it. Twice: moving
+        // to a monitor with different scaling makes Windows rescale the window afterwards
+        // (WM_DPICHANGED); the second call, already on that monitor, sets the size for real.
+        for _ in 0..2 {
+            unsafe {
+                SetWindowPos(
+                    overlay.hwnd,
+                    HWND_TOPMOST,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
         }
         self.visible = true;
         self.follow_focus = follow_focus;
@@ -242,9 +272,14 @@ impl Host {
         if !self.visible {
             return;
         }
-        if let Some(overlay) = &self.window {
+        if let Some(overlay) = &mut self.window {
             // SAFETY: hiding our own window.
             unsafe { ShowWindow(overlay.hwnd, SW_HIDE) };
+            overlay
+                .input
+                .egui_input_mut()
+                .events
+                .extend(super::release_pointer());
         }
         self.visible = false;
         self.last_hide = Instant::now();
@@ -253,12 +288,16 @@ impl Host {
         log::info!("overlay hidden");
     }
 
-    fn toggle(&mut self, follow_focus: bool) {
-        if self.visible {
-            self.hide();
-        } else {
-            self.show(follow_focus);
+    /// Opens for `dayz-map show` (a desktop shortcut, say) or after a restart. Over the game,
+    /// the map closes again when the user switches away from it, as with the hotkey.
+    fn show_by_command(&mut self) {
+        let game = win::foreground()
+            .filter(|front| !front.ours && self.matches_game(front))
+            .map(|front| front.hwnd);
+        if game.is_some() {
+            self.game = game;
         }
+        self.show(game.is_some());
     }
 
     fn request_redraw(&self) {
@@ -268,11 +307,18 @@ impl Host {
     }
 
     fn on_key(&mut self, key: PhysicalKey, state: ElementState) {
-        if state == ElementState::Released {
-            self.held.remove(&key);
+        if Some(key) != self.hotkey {
             return;
         }
-        if !self.held.insert(key) || Some(key) != self.hotkey {
+        if state == ElementState::Released {
+            self.hotkey_seen = None;
+            return;
+        }
+        let repeat = self
+            .hotkey_seen
+            .is_some_and(|seen| seen.elapsed() < REPEAT_WINDOW);
+        self.hotkey_seen = Some(Instant::now());
+        if repeat {
             return;
         }
         // SAFETY: plain key-state queries.
@@ -291,7 +337,7 @@ impl Host {
             self.hide();
             return;
         }
-        let matches = self.matches_game(&front.description);
+        let matches = self.matches_game(&front);
         log::info!(
             "hotkey in {:?}: {}",
             front.description,
@@ -312,19 +358,22 @@ impl Host {
         }
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() || !self.visible {
+            return;
+        }
+        // (Checked while shown, so the restarted overlay opens again only if this one was.)
+        if self.gpu.is_lost() {
+            self.hide();
+            self.restart = true;
+            event_loop.exit();
+            return;
+        }
         let Some(overlay) = self.window.as_mut() else {
             return;
         };
-        if !self.visible {
-            return;
-        }
         let window = overlay.window.clone();
-        let mut raw = overlay.input.take_egui_input(&window);
-        raw.viewports
-            .entry(egui::ViewportId::ROOT)
-            .or_default()
-            .native_pixels_per_point = Some(window.scale_factor() as f32);
+        let raw = overlay.input.take_egui_input(&window);
         let app = &mut self.app;
         let mut output = self.egui_ctx.run_ui(raw, |ui| app.ui(ui));
         overlay
@@ -342,14 +391,30 @@ impl Host {
             .gpu
             .paint(&overlay.surface, &self.egui_ctx, output, opacity, || {})
         {
-            Frame::Presented if fading => window.request_redraw(),
-            Frame::Presented => {}
-            Frame::Skipped => window.request_redraw(),
-            Frame::Outdated => {
-                let size = window.inner_size();
-                self.gpu
-                    .configure(&overlay.surface, size.width, size.height);
+            Frame::Presented if fading => {
+                self.outdated = 0;
                 window.request_redraw();
+            }
+            Frame::Presented => self.outdated = 0,
+            Frame::Skipped => {
+                let at = Instant::now() + SKIPPED_RETRY;
+                self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
+            }
+            Frame::Outdated => {
+                self.outdated += 1;
+                let size = window.inner_size();
+                match self
+                    .gpu
+                    .configure(&overlay.surface, size.width, size.height)
+                {
+                    // Redraw right away after a resize, but don't spin if it keeps happening.
+                    Ok(()) if self.outdated <= 2 => window.request_redraw(),
+                    Ok(()) => {
+                        let at = Instant::now() + SKIPPED_RETRY;
+                        self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
+                    }
+                    Err(e) => log::error!("{e:#}"),
+                }
             }
         }
         if self.app.take_close_request() {
@@ -369,15 +434,16 @@ impl ApplicationHandler<HostEvent> for Host {
             return;
         }
         if std::mem::take(&mut self.show_at_start) {
-            self.show(false);
+            self.show_by_command();
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: HostEvent) {
         match event {
-            HostEvent::Command(Command::Show) => self.show(false),
+            HostEvent::Command(Command::Show) => self.show_by_command(),
             HostEvent::Command(Command::Hide) => self.hide(),
-            HostEvent::Command(Command::Toggle) => self.toggle(false),
+            HostEvent::Command(Command::Toggle) if self.visible => self.hide(),
+            HostEvent::Command(Command::Toggle) => self.show_by_command(),
             HostEvent::Command(Command::Quit) => {
                 self.hide();
                 event_loop.exit();
@@ -386,28 +452,31 @@ impl ApplicationHandler<HostEvent> for Host {
                 self.app.on_session(session);
                 self.request_redraw();
             }
-            HostEvent::Repaint(delay) => {
-                if delay.is_zero() {
-                    self.request_redraw();
-                } else if delay < Duration::from_secs(3600) {
-                    let at = Instant::now() + delay;
+            HostEvent::Repaint(delay) => match repaint_in(delay) {
+                Some(None) => self.request_redraw(),
+                Some(Some(at)) => {
                     self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
                 }
-            }
+                None => {}
+            },
         }
     }
 
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(overlay) = self.window.as_mut() else {
             return;
         };
         let response = overlay.input.on_window_event(&overlay.window, &event);
         match event {
-            WindowEvent::RedrawRequested => self.render(),
+            WindowEvent::RedrawRequested => self.render(event_loop),
             WindowEvent::Resized(size) => {
-                self.gpu
-                    .configure(&overlay.surface, size.width, size.height);
-                overlay.window.request_redraw();
+                match self
+                    .gpu
+                    .configure(&overlay.surface, size.width, size.height)
+                {
+                    Ok(()) => overlay.window.request_redraw(),
+                    Err(e) => log::error!("{e:#}"),
+                }
             }
             // Not closable from the taskbar (it isn't on it) or Alt+F4 (it never has focus).
             WindowEvent::CloseRequested => {}
@@ -431,9 +500,11 @@ impl ApplicationHandler<HostEvent> for Host {
         if self.visible && self.follow_focus && self.next_focus_check <= now {
             self.next_focus_check = now + FOCUS_CHECK;
             // The map belongs to the game; don't leave it over whatever the user switched to.
-            if let Some(front) = win::foreground()
+            // (Checking the window handle first skips the process lookup in the usual case.)
+            if self.game != Some(win::foreground_window())
+                && let Some(front) = win::foreground()
                 && !front.ours
-                && !self.matches_game(&front.description)
+                && !self.matches_game(&front)
             {
                 self.hide();
             }
@@ -460,6 +531,9 @@ fn hotkey_key(name: &str) -> Option<PhysicalKey> {
         (scan != -1).then_some((scan & 0xff) as u16)
     };
     let vk = match (chars.next(), chars.next()) {
+        // Letter and digit keys have fixed key codes, whatever layout is active (with Russian as
+        // the default, `VkKeyScanW` finds no key for `m`).
+        (Some(c), None) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as u16,
         (Some(c), None) => from_char(c)?,
         _ => match lower.as_str() {
             "tab" => VK_TAB,

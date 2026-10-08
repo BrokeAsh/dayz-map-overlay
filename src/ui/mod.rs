@@ -6,12 +6,13 @@
 mod tiles;
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Margin, Pos2, Rect, Sense, Shape,
-    Stroke, StrokeKind, Vec2,
+    Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, Vec2,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::game::Session;
@@ -60,7 +61,8 @@ impl View {
     /// Zooms by `factor`, keeping the world point under `anchor` in place.
     fn zoom_around(&mut self, screen: Rect, anchor: Pos2, factor: f64, min_zoom: f64) {
         let before = self.to_world(screen, anchor);
-        self.zoom = (self.zoom * factor).clamp(min_zoom, MAX_ZOOM);
+        // (A tiny map can't zoom out past MAX_ZOOM; `clamp` panics if min > max.)
+        self.zoom = (self.zoom * factor).clamp(min_zoom.min(MAX_ZOOM), MAX_ZOOM);
         let after = self.to_world(screen, anchor);
         self.center[0] += before[0] - after[0];
         self.center[1] += before[1] - after[1];
@@ -81,8 +83,15 @@ pub struct OverlayApp {
     pois: HashMap<String, Arc<LoadedPois>>,
     library: Library,
     seen_generation: u64,
+    /// Each map.toml's time and size when the maps were last read, to notice imports made by
+    /// another program.
+    maps_read: Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
+    /// When the overlay last looked for those, while open.
+    maps_checked: Instant,
     session: Session,
     show_maps_window: bool,
+    /// Closed by the user while the game folder wasn't found (it opens by itself then).
+    maps_window_dismissed: bool,
     close_requested: bool,
     /// The folder the user is picking for the game, delivered by the dialog's thread.
     picked_game_dir: Option<crossbeam_channel::Receiver<Option<PathBuf>>>,
@@ -105,8 +114,11 @@ impl OverlayApp {
             pois: HashMap::new(),
             library,
             seen_generation: 0,
+            maps_read: Vec::new(),
+            maps_checked: Instant::now(),
             session: Session::default(),
             show_maps_window: false,
+            maps_window_dismissed: false,
             close_requested: false,
             picked_game_dir: None,
             notice: None,
@@ -120,6 +132,8 @@ impl OverlayApp {
             self.current
                 .map(|i| self.maps[i].meta.id.clone())
                 .or(self.config.view.map.clone());
+        // Before reading them: a file saved in between then counts as changed next time.
+        self.maps_read = map_files();
         self.maps = maps::load_all();
         self.current = selected
             .and_then(|id| self.maps.iter().position(|m| m.meta.id == id))
@@ -127,18 +141,33 @@ impl OverlayApp {
     }
 
     fn select(&mut self, id: &str) {
+        // Maybe installed since the list was read (by `dayz-map import-image`, say).
+        if !self.maps.iter().any(|m| m.meta.id == id) {
+            self.reload_maps();
+        }
         if let Some(i) = self.maps.iter().position(|m| m.meta.id == id) {
             self.current = Some(i);
             self.config.view.map = Some(id.to_string());
         }
     }
 
+    /// Whether the game itself is running (not just its launcher).
+    #[cfg(target_os = "linux")]
+    pub fn game_running(&self) -> bool {
+        self.session.running
+    }
+
     /// Called when the game's state changes, whether or not the overlay is open.
     pub fn on_session(&mut self, session: Session) {
+        // The mods can arrive after the map (the RPT is written later), and they decide which
+        // copy of a map the server uses.
         if let Some(world) = &session.world
-            && session.world != self.session.world
+            && (session.world != self.session.world || session.mods != self.session.mods)
         {
             self.library.ensure(world, &session.mods);
+        }
+        if session.world.is_none() && self.session.world.is_some() {
+            self.library.forget();
         }
         self.session = session;
     }
@@ -155,20 +184,41 @@ impl OverlayApp {
             self.pois.clear();
             self.reload_maps();
         }
-        if let Some(id) = ready {
+        // Only while the game is still on that map: the player may have left (and picked
+        // another map) while it was being built.
+        if let Some(id) = ready
+            && self.session.world.as_deref() == Some(id.as_str())
+        {
             self.select(&id);
         }
     }
 
     pub fn on_show(&mut self) {
+        self.reload_if_changed();
         self.sync_library();
         self.close_requested = false;
+    }
+
+    /// Rereads the maps if another program (`dayz-map import`) rebuilt one, whose old tiles are
+    /// gone.
+    fn reload_if_changed(&mut self) {
+        self.maps_checked = Instant::now();
+        if self.maps_changed() {
+            self.tiles.clear();
+            self.pois.clear();
+            self.reload_maps();
+        }
+    }
+
+    /// Whether any map's `map.toml` was saved, added or removed since the maps were read.
+    fn maps_changed(&self) -> bool {
+        map_files() != self.maps_read
     }
 
     pub fn on_hide(&mut self) {
         // Free GPU memory for the game; the overview levels reload instantly next time.
         self.tiles.trim(2);
-        if let Err(e) = self.config.save() {
+        if let Err(e) = self.config.save_from_overlay(false) {
             log::warn!("saving settings: {e:#}");
         }
     }
@@ -179,6 +229,15 @@ impl OverlayApp {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        const CHECK_EVERY: Duration = Duration::from_secs(2);
+        if self.maps_checked.elapsed() >= CHECK_EVERY {
+            self.reload_if_changed();
+        }
+        // Looked for again then, even if nothing else happens. (A little later: egui wakes a
+        // frame early.)
+        let next = CHECK_EVERY.saturating_sub(self.maps_checked.elapsed());
+        ui.ctx()
+            .request_repaint_after(next + Duration::from_millis(50));
         let ctx = ui.ctx().clone();
         let screen = ui.max_rect();
         self.tiles.begin_frame(&ctx);
@@ -193,11 +252,33 @@ impl OverlayApp {
             self.map_view(ui, index, screen);
         }
         self.toolbar(&ctx);
-        let game_missing = crate::paths::current().game.is_none();
-        if self.show_maps_window || self.maps.is_empty() || game_missing {
+        if self.maps_window_shown() {
             self.maps_window(&ctx);
         }
         self.tiles.end_frame();
+    }
+
+    /// Whether the Maps window is up: asked for, or needed (no maps; or no game folder, until
+    /// closed while a map is installed).
+    fn maps_window_shown(&mut self) -> bool {
+        let game_missing = crate::paths::current().game.is_none();
+        if !game_missing {
+            // Asks again if the game goes missing later (a library drive unplugged).
+            self.maps_window_dismissed = false;
+        }
+        self.show_maps_window
+            || self.maps.is_empty()
+            || (game_missing && !self.maps_window_dismissed)
+    }
+
+    /// Closes the Maps window, for good if it opened by itself. (Not while no map is installed:
+    /// it stays then, and must keep asking for the game folder once one is.)
+    fn close_maps_window(&mut self) {
+        if self.maps.is_empty() {
+            return;
+        }
+        self.show_maps_window = false;
+        self.maps_window_dismissed = crate::paths::current().game.is_none();
     }
 
     /// Opens the system folder picker. The overlay closes meanwhile (it would cover the dialog)
@@ -243,7 +324,7 @@ impl OverlayApp {
                 log::info!("using the DayZ folder {}", game.display());
                 self.notice = None;
                 self.config.game_dir = Some(game);
-                if let Err(e) = self.config.save() {
+                if let Err(e) = self.config.save_from_overlay(true) {
                     log::warn!("saving settings: {e:#}");
                 }
                 self.library.relocate(&self.config);
@@ -309,24 +390,6 @@ impl OverlayApp {
             if factor != 1.0 {
                 view.zoom_around(screen, p, factor, min_zoom);
             }
-        }
-        let (zoom_in, zoom_out, reset) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals),
-                i.key_pressed(Key::Minus),
-                i.key_pressed(Key::Num0) || i.key_pressed(Key::Home),
-            )
-        });
-        if zoom_in || zoom_out {
-            view.zoom_around(
-                screen,
-                screen.center(),
-                if zoom_in { 1.5 } else { 1.0 / 1.5 },
-                min_zoom,
-            );
-        }
-        if reset {
-            *view = fit;
         }
         view.center = view.center.map(|c| c.clamp(0.0, world));
         let view = *view;
@@ -603,11 +666,13 @@ impl OverlayApp {
                         {
                             self.views.remove(&self.maps[i].meta.id);
                         }
-                        if ui
-                            .selectable_label(self.show_maps_window, "Maps…")
-                            .clicked()
-                        {
-                            self.show_maps_window = !self.show_maps_window;
+                        let shown = self.maps_window_shown();
+                        if ui.selectable_label(shown, "Maps…").clicked() {
+                            if shown {
+                                self.close_maps_window();
+                            } else {
+                                self.show_maps_window = true;
+                            }
                         }
                         ui.label(
                             egui::RichText::new(format!(
@@ -745,6 +810,20 @@ impl OverlayApp {
                         });
                     });
                 }
+                // Maps with no files in the game or Workshop folders, such as imported pictures.
+                let unique = catalog.unique();
+                for map in self.maps.iter().filter(|m| !unique.iter().any(|w| w.id == m.meta.id)) {
+                    ui.horizontal(|ui| {
+                        ui.label(&map.meta.name);
+                        let label = if map.meta.format == 0 { "picture" } else { "installed" };
+                        ui.label(egui::RichText::new(label).weak().small());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("View").clicked() {
+                                view = Some(map.meta.id.clone());
+                            }
+                        });
+                    });
+                }
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -755,7 +834,7 @@ impl OverlayApp {
             });
         });
         if !open {
-            self.show_maps_window = false;
+            self.close_maps_window();
         }
         if let Some(id) = view {
             self.select(&id);
@@ -932,7 +1011,8 @@ fn paint_grid(painter: &egui::Painter, view: &View, screen: Rect, world: f64) {
         if (visible.left()..=visible.right()).contains(&x) {
             painter.vline(x, visible.y_range(), stroke);
         }
-        let y = view.to_screen(screen, 0.0, m).y;
+        // Rows run from the north edge, like the square numbers (the last row may be short).
+        let y = view.to_screen(screen, 0.0, world - m).y;
         if (visible.top()..=visible.bottom()).contains(&y) {
             painter.hline(visible.x_range(), y, stroke);
         }
@@ -965,4 +1045,22 @@ fn paint_grid(painter: &egui::Painter, view: &View, screen: Rect, world: f64) {
             );
         }
     }
+}
+
+/// Every map.toml, with its modification time and size (`None` if it can't be read).
+fn map_files() -> Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)> {
+    let mut files: Vec<_> = std::fs::read_dir(maps::maps_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path().join("map.toml");
+            let stamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| Some((m.modified().ok()?, m.len())));
+            (path, stamp)
+        })
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }

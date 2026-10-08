@@ -10,8 +10,9 @@ pub const DAYZ_APP: &str = "221100";
 fn steam_roots() -> Vec<PathBuf> {
     use crate::win::{HKEY_CURRENT_USER, registry_string};
     let mut roots: Vec<PathBuf> =
+        // Steam stores it as `c:/program files (x86)/steam`; print it the usual way.
         registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath")
-            .map(PathBuf::from)
+            .map(|path| real_path(Path::new(&path)))
             .into_iter()
             .collect();
     roots.push(PathBuf::from(r"C:\Program Files (x86)\Steam"));

@@ -22,65 +22,97 @@ const CLUSTER_M: f32 = 400.0;
 type WaterPoint<'a> = (f32, f32, &'a str);
 
 /// Lower-case class names that extend `Well` in any of these archives' scripts.
-pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
-    let mut parents: HashMap<String, String> = HashMap::new();
+pub fn well_classes(scripts: &[Arc<Pbo>]) -> anyhow::Result<HashSet<String>> {
+    // Each class's subclasses. Scripts redeclare classes (`modded class`, other mods), and any
+    // one path to `Well` counts.
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for pbo in scripts {
         for entry in &pbo.entries {
             if !entry.name.to_ascii_lowercase().ends_with(".c") {
                 continue;
             }
-            let Ok(data) = pbo.read(entry) else {
-                continue;
+            let data = match pbo.read(entry) {
+                Ok(data) => data,
+                // Without this file a well class could go missing, and with it every one of
+                // its wells.
+                Err(e) if super::pbo::is_io(&e) => return Err(e),
+                Err(_) => continue,
             };
+            // Every file: a class can extend `Well` through others declared elsewhere
+            // (`LabTap extends Sink`, with `Sink extends Well` in another file).
             let text = String::from_utf8_lossy(&data);
-            if !text.contains("Well") {
-                continue;
-            }
             for (class, parent) in class_declarations(&text) {
-                parents.insert(class, parent);
+                children.entry(parent).or_default().push(class);
             }
         }
     }
     let mut wells: HashSet<String> = BASE_WELLS.iter().map(|s| s.to_string()).collect();
     wells.insert("well".into());
-    // Follow `extends` chains until nothing new joins.
-    loop {
-        let before = wells.len();
-        for (class, parent) in &parents {
-            if wells.contains(parent) {
-                wells.insert(class.clone());
+    // Everything below `Well` (and the base pumps), each class visited once.
+    let mut queue: Vec<String> = wells.iter().cloned().collect();
+    while let Some(class) = queue.pop() {
+        for child in children.get(&class).into_iter().flatten() {
+            if wells.insert(child.clone()) {
+                queue.push(child.clone());
             }
-        }
-        if wells.len() == before {
-            break;
         }
     }
     wells.remove("well");
-    wells
+    Ok(wells)
 }
 
-/// `class A extends B` and `class A : B`, lower-cased.
+/// `class A extends B` and `class A : B`, lower-cased, outside comments and strings.
 fn class_declarations(text: &str) -> Vec<(String, String)> {
+    let tokens = tokens(text);
     let mut found = Vec::new();
-    let tokens: Vec<&str> = text
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
-        .filter(|t| !t.is_empty())
-        .collect();
-    for i in 0..tokens.len().saturating_sub(2) {
-        if tokens[i] != "class" {
-            continue;
-        }
-        let class = tokens[i + 1].trim_end_matches(':');
-        let parent = match (tokens[i + 1].ends_with(':'), tokens[i + 2]) {
-            (true, parent) => Some(parent),
-            (false, "extends" | ":") => tokens.get(i + 3).copied(),
-            _ => None,
-        };
-        if let Some(parent) = parent {
-            found.push((class.to_ascii_lowercase(), parent.to_ascii_lowercase()));
+    for i in 0..tokens.len().saturating_sub(3) {
+        if tokens[i] == "class" && matches!(tokens[i + 2], "extends" | ":") {
+            let (class, parent) = (tokens[i + 1], tokens[i + 3]);
+            if class != ":" && parent != ":" {
+                found.push((class.to_ascii_lowercase(), parent.to_ascii_lowercase()));
+            }
         }
     }
     found
+}
+
+/// Enforce Script's words and `:`s, skipping comments and string literals.
+fn tokens(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            i += rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        } else if rest.starts_with(b"/*") {
+            i += rest
+                .windows(2)
+                .skip(2)
+                .position(|w| w == b"*/")
+                .map_or(rest.len(), |p| p + 4);
+        } else if rest[0] == b'"' {
+            // To the closing quote, past escaped ones.
+            let mut j = 1;
+            while j < rest.len() && rest[j] != b'"' {
+                j += if rest[j] == b'\\' { 2 } else { 1 };
+            }
+            i += (j + 1).min(rest.len());
+        } else if rest[0] == b':' {
+            tokens.push(":");
+            i += 1;
+        } else if rest[0].is_ascii_alphanumeric() || rest[0] == b'_' {
+            let len = rest
+                .iter()
+                .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                .unwrap_or(rest.len());
+            tokens.push(&text[i..i + len]);
+            i += len;
+        } else {
+            i += 1;
+        }
+    }
+    tokens
 }
 
 /// What a water model is, or `None` if it isn't fresh water (streambeds are dry, ice is
@@ -111,7 +143,7 @@ pub fn markers(objects: &wrp::Objects, wells: &HashSet<String>) -> Vec<Marker> {
     let is_well = |class: &str| {
         wells.contains(class)
             // Config variants of a scripted class, like `..._pump_yellow_metro`.
-            || wells.iter().any(|w| class.strip_prefix(w.as_str()).is_some_and(|r| r.starts_with('_')))
+            || class.match_indices('_').any(|(at, _)| wells.contains(&class[..at]))
     };
     let mut markers: Vec<Marker> = objects
         .classed
@@ -149,9 +181,13 @@ fn without_lone_tiles(objects: &wrp::Objects) -> Vec<(u32, f32, f32)> {
             (z / NEIGHBOUR_M).floor() as i32,
         )
     };
+    // Positions to the half metre, each once: tiles stacked on one spot (a crafted terrain could
+    // stack thousands) would otherwise make every lookup scan all of them.
+    let spot = |x: f32, z: f32| ((x * 2.0).round() as i32, (z * 2.0).round() as i32);
     let mut tiles: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+    let mut seen = HashSet::new();
     for &(model, x, z) in &objects.placed {
-        if is_tile(model) {
+        if is_tile(model) && seen.insert(spot(x, z)) {
             tiles.entry(cell(x, z)).or_default().push((x, z));
         }
     }
@@ -168,11 +204,17 @@ fn without_lone_tiles(objects: &wrp::Objects) -> Vec<(u32, f32, f32)> {
             })
         })
     };
+    let mut answers: HashMap<(i32, i32), bool> = HashMap::new();
     objects
         .placed
         .iter()
         .copied()
-        .filter(|&(model, x, z)| !is_tile(model) || has_neighbour(x, z))
+        .filter(|&(model, x, z)| {
+            !is_tile(model)
+                || *answers
+                    .entry(spot(x, z))
+                    .or_insert_with(|| has_neighbour(x, z))
+        })
         .collect()
 }
 
@@ -219,13 +261,24 @@ fn cluster(points: &[WaterPoint]) -> Vec<Marker> {
         })
         .collect();
     groups.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.x.total_cmp(&b.1.x)));
-    let mut kept: Vec<Marker> = Vec::new();
+    // Kept markers by `spacing`-sized cell, so checking for a crowded neighbour looks at the
+    // nine cells around instead of every marker kept so far.
     let spacing = CLUSTER_M * 0.6;
+    let bucket = |x: f32, z: f32| ((x / spacing).floor() as i32, (z / spacing).floor() as i32);
+    let mut kept: Vec<Marker> = Vec::new();
+    let mut near: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (_, marker) in groups {
-        let crowded = kept
-            .iter()
-            .any(|k| (k.x - marker.x).hypot(k.z - marker.z) < spacing);
+        let (bx, bz) = bucket(marker.x, marker.z);
+        let crowded = (bx - 1..=bx + 1).any(|i| {
+            (bz - 1..=bz + 1).any(|j| {
+                near.get(&(i, j)).is_some_and(|list| {
+                    list.iter()
+                        .any(|&k| (kept[k].x - marker.x).hypot(kept[k].z - marker.z) < spacing)
+                })
+            })
+        });
         if !crowded {
+            near.entry((bx, bz)).or_default().push(kept.len());
             kept.push(marker);
         }
     }
@@ -243,6 +296,18 @@ mod tests {
         assert_eq!(parents["land_a3_lab_sink"], "well");
         assert_eq!(parents["sink2"], "land_a3_lab_sink");
         assert_eq!(parents["other"], "house");
+    }
+
+    #[test]
+    fn declarations_skip_comments_and_strings() {
+        let text = "/* class LabTap extends Well {} */ class LabTap extends House {}\n\
+                    // class Tap2 extends Well\n\
+                    string s = \"class Tap3 extends Well \\\" class Tap4 extends Well\";\n\
+                    class Compact:Well {}";
+        let parents: HashMap<_, _> = class_declarations(text).into_iter().collect();
+        assert_eq!(parents["labtap"], "house");
+        assert_eq!(parents["compact"], "well");
+        assert_eq!(parents.len(), 2, "{parents:?}");
     }
 
     #[test]

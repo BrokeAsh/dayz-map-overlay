@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use super::pbo::Pbo;
 use super::poi::Place;
@@ -22,7 +21,7 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 2;
+pub const POI_VERSION: u32 = 4;
 
 const ECONOMY_FILES: [&str; 4] = [
     "mapgrouppos.xml",
@@ -47,13 +46,20 @@ pub struct EconomySource {
 }
 
 impl EconomySource {
-    pub fn read_all(&self) -> HashMap<String, Vec<u8>> {
-        self.files
-            .iter()
-            .filter_map(|(name, &i)| {
-                Some((name.clone(), self.pbo.read(&self.pbo.entries[i]).ok()?))
-            })
-            .collect()
+    /// Every file that reads. A corrupt one is skipped, but a failing read (a file another
+    /// program has locked, say) fails the whole thing, so the caller keeps what it had.
+    pub fn read_all(&self) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+        let mut files = HashMap::new();
+        for (name, &i) in &self.files {
+            match self.pbo.read(&self.pbo.entries[i]) {
+                Ok(data) => {
+                    files.insert(name.clone(), data);
+                }
+                Err(e) if super::pbo::is_io(&e) => return Err(e),
+                Err(e) => log::warn!("skipped {name}: {e:#}"),
+            }
+        }
+        Ok(files)
     }
 }
 
@@ -66,7 +72,7 @@ pub struct TerrainFile {
 
 impl TerrainFile {
     pub fn read(&self) -> anyhow::Result<Vec<u8>> {
-        self.pbo.read(&self.pbo.entries[self.entry])
+        self.pbo.read_large(&self.pbo.entries[self.entry])
     }
 }
 
@@ -90,20 +96,21 @@ pub struct WorldSource {
 }
 
 impl WorldSource {
-    /// Changes whenever the source files change (a mod update) or the importer does.
+    /// Changes whenever the satellite files change (a mod update) or the importer does. (The
+    /// points of interest have their own, below.)
     pub fn fingerprint(&self) -> String {
-        let mut parts = vec![
+        // The stamp from when the file was scanned, which the entries' offsets belong to: if it
+        // changes during an import, the next scan sees it and imports again.
+        [
             IMPORT_VERSION.to_string(),
             self.satellite.pbo.path.display().to_string(),
-        ];
-        parts.push(stamp(&self.satellite.pbo.path));
-        if let Some(economy) = &self.economy {
-            parts.push(stamp(&economy.pbo.path));
-        }
-        parts.join("|")
+            self.satellite.pbo.opened.clone(),
+        ]
+        .join("|")
     }
 
-    /// Changes when the files the points of interest come from change.
+    /// Changes when the files the points of interest come from change (including the scripts
+    /// that say which buildings are wells).
     pub fn pois_fingerprint(&self) -> String {
         let mut parts = vec![POI_VERSION.to_string()];
         for pbo in self
@@ -111,11 +118,37 @@ impl WorldSource {
             .iter()
             .map(|e| &e.pbo)
             .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.scripts)
         {
             parts.push(pbo.path.display().to_string());
-            parts.push(stamp(&pbo.path));
+            parts.push(pbo.opened.clone());
         }
         parts.join("|")
+    }
+
+    /// Whether an installed pack was built from these files as they are now. (A mod update can
+    /// also resize the terrain without touching its tiles.)
+    pub fn is_current(&self, pack: &maps::MapPack) -> bool {
+        let fingerprint = self.fingerprint();
+        // Before 0.2 the economy file's stamp followed; the points of interest track it now.
+        (pack.meta.source == fingerprint
+            || pack
+                .meta
+                .source
+                .strip_prefix(&fingerprint)
+                .is_some_and(|rest| rest.starts_with('|')))
+            && self
+                .world_size
+                .is_none_or(|size| (size.round() - pack.meta.world_size).abs() < 1.0)
+    }
+
+    /// Whether any of its archives changed since the scan, so their entry offsets are stale.
+    pub fn changed_since_scan(&self) -> bool {
+        std::iter::once(&self.satellite.pbo)
+            .chain(self.economy.iter().map(|e| &e.pbo))
+            .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.scripts)
+            .any(|pbo| pbo.changed())
     }
 
     pub fn source_label(&self) -> String {
@@ -130,6 +163,8 @@ impl WorldSource {
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     pub worlds: Vec<WorldSource>,
+    /// Every mod (Workshop item id or `@folder`) the scan looked at.
+    pub mods: std::collections::HashSet<String>,
 }
 
 impl Catalog {
@@ -142,15 +177,16 @@ impl Catalog {
     /// The source to use for a world: one from a mod the server loads, then the base game, then
     /// the most complete.
     pub fn best(&self, id: &str, server_mods: &[String]) -> Option<WorldSource> {
-        let mut best = self
-            .candidates(id)
-            .max_by_key(|w| {
-                let on_server = w.mod_id.as_ref().is_some_and(|m| server_mods.contains(m));
-                (on_server, w.mod_id.is_none(), w.satellite.tiles.len())
-            })?
-            .clone();
-        // A retexture mod may ship only tiles; borrow the rest from another copy of the map.
-        for other in self.candidates(id) {
+        let rank = |w: &WorldSource| {
+            let on_server = w.mod_id.as_ref().is_some_and(|m| server_mods.contains(m));
+            (on_server, w.mod_id.is_none(), w.satellite.tiles.len())
+        };
+        let mut ranked: Vec<&WorldSource> = self.candidates(id).collect();
+        ranked.sort_by_key(|w| std::cmp::Reverse(rank(w)));
+        let mut best = (*ranked.first()?).clone();
+        // A retexture mod may ship only tiles; borrow the rest from another copy of the map, in
+        // the same order (one the server loads before one it doesn't).
+        for other in ranked {
             if best.world_size.is_none() {
                 best.world_size = other.world_size;
             }
@@ -258,6 +294,10 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         used_tiles[i] = true;
         let economy = best_economy(&economies, &def.mod_id, &def.anchor);
         let id = def.class.to_lowercase();
+        if !maps::valid_id(&id) {
+            log::warn!("skipping a world with an unusable name: {:?}", def.class);
+            continue;
+        }
         let mut world_scripts = scripts.get(&None).cloned().unwrap_or_default();
         if def.mod_id.is_some() {
             world_scripts.extend(scripts.get(&def.mod_id).into_iter().flatten().cloned());
@@ -282,7 +322,7 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             continue;
         }
         let id = world_name(&source.pbo.prefix);
-        if id.is_empty()
+        if !maps::valid_id(&id)
             || worlds
                 .iter()
                 .any(|w| w.id == id && w.mod_id == archive.mod_id)
@@ -304,7 +344,8 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         });
     }
     worlds.sort_by_key(|a| a.name.to_lowercase());
-    Catalog { worlds }
+    let mods = archives.iter().filter_map(|a| a.mod_id.clone()).collect();
+    Catalog { worlds, mods }
 }
 
 /// How well an archive belongs to a world anchored at `anchor`; `None` if it doesn't.
@@ -441,7 +482,9 @@ fn tile_source(pbo: &Arc<Pbo>) -> Option<TileSource> {
         let Some((x, y)) = coords.split_once('_') else {
             continue;
         };
-        if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
+        // Real terrains have at most a few dozen tiles per side; a stray name like
+        // `s_99999_000` mustn't make a grid of billions.
+        if let (Ok(x @ 0..1024), Ok(y @ 0..1024)) = (x.parse::<u32>(), y.parse::<u32>()) {
             tiles.insert((x, y), index);
         }
     }
@@ -542,18 +585,6 @@ fn world_defs(archive: &Archive) -> Vec<WorldDef> {
             })
         })
         .collect()
-}
-
-fn stamp(path: &Path) -> String {
-    std::fs::metadata(path)
-        .map(|m| {
-            let modified = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok());
-            format!("{}:{}", m.len(), modified.map_or(0, |d| d.as_secs()))
-        })
-        .unwrap_or_default()
 }
 
 fn display_name(id: &str, description: Option<&str>) -> String {

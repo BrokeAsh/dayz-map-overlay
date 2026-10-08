@@ -12,6 +12,9 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// Created with the first surface, once the output format is known.
     renderer: Option<(egui_wgpu::Renderer, wgpu::TextureFormat)>,
+    /// Set when the device (a driver reset or update) or the surface is lost; nothing can draw
+    /// after that until the overlay restarts.
+    lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What happened to a frame.
@@ -34,20 +37,57 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("dayz-map"),
+                // The default 8192 px is less than a scaled 8K-wide monitor needs.
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    ..wgpu::Limits::default()
+                },
                 ..Default::default()
             }))?;
+        let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("the graphics device was lost ({reason:?}): {message}");
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        // wgpu panics on errors nobody captured; log them instead (the first few: one broken
+        // resource fails every frame). Running out of graphics memory while the game fills it
+        // leaves resources unusable, so start over as if the device were lost.
+        let errors = std::sync::atomic::AtomicU32::new(0);
+        let flag = lost.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |error| {
+            if errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10 {
+                log::error!("graphics error: {error}");
+            }
+            if matches!(error, wgpu::Error::OutOfMemory { .. }) {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
             renderer: None,
+            lost,
         })
     }
 
+    /// Whether the device is gone, so the overlay has to start over to draw again.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Sizes the surface (in pixels) for see-through drawing.
-    pub fn configure(&mut self, surface: &wgpu::Surface, width: u32, height: u32) {
+    pub fn configure(&mut self, surface: &wgpu::Surface, width: u32, height: u32) -> Result<()> {
         let caps = surface.get_capabilities(&self.adapter);
+        if caps.formats.is_empty() || caps.alpha_modes.is_empty() {
+            anyhow::bail!(
+                "{} can't draw to this display; with several GPUs, try running on the one \
+                 the monitor is connected to",
+                self.adapter.get_info().name
+            );
+        }
         let format = match &self.renderer {
             Some((_, format)) => *format,
             None => {
@@ -74,11 +114,17 @@ impl Gpu {
             );
             caps.alpha_modes[0]
         };
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        // Windows has no frame callbacks to pace redraws, so wait for the display there.
+        let present_mode = if cfg!(windows) {
+            wgpu::PresentMode::Fifo
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
         };
+        // A surface that can't be set up (no desktop to show on, say) is an error to report,
+        // not wgpu's default of panicking.
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
@@ -93,6 +139,10 @@ impl Gpu {
                 view_formats: vec![],
             },
         );
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            anyhow::bail!("setting up the overlay's drawing surface: {e}");
+        }
+        Ok(())
     }
 
     /// Draws egui's output, faded by `opacity` (0 to 1). `before_present` runs just before the
@@ -125,13 +175,31 @@ impl Gpu {
                 renderer.update_texture(device, queue, *id, delta);
             }
         }
+        // egui reports each freed texture only once, so free them even if nothing is drawn.
+        let free = |renderer: &mut egui_wgpu::Renderer| {
+            for id in &output.textures_delta.free {
+                renderer.free_texture(id);
+            }
+        };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                free(renderer);
                 return Frame::Skipped;
             }
-            _ => return Frame::Outdated,
+            // Reconfiguring can't bring it back; it needs a new surface, which the restart for a
+            // lost device makes.
+            wgpu::CurrentSurfaceTexture::Lost => {
+                log::error!("the window's GPU surface was lost");
+                self.lost.store(true, std::sync::atomic::Ordering::Relaxed);
+                free(renderer);
+                return Frame::Skipped;
+            }
+            _ => {
+                free(renderer);
+                return Frame::Outdated;
+            }
         };
         let view = frame
             .texture
@@ -165,9 +233,7 @@ impl Gpu {
         queue.submit(commands);
         before_present();
         queue.present(frame);
-        for id in &output.textures_delta.free {
-            renderer.free_texture(id);
-        }
+        free(renderer);
         Frame::Presented
     }
 
@@ -221,11 +287,20 @@ impl Fade {
 
 /// When egui wants its next frame: `None` for never, `Some(None)` for now.
 pub fn repaint_after(output: &egui::FullOutput) -> Option<Option<Instant>> {
-    let viewport = output.viewport_output.get(&egui::ViewportId::ROOT)?;
-    if viewport.repaint_delay.is_zero() {
+    repaint_in(
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)?
+            .repaint_delay,
+    )
+}
+
+/// The same for a delay egui asked for (it uses a huge delay to mean "never").
+pub fn repaint_in(delay: Duration) -> Option<Option<Instant>> {
+    if delay.is_zero() {
         Some(None)
-    } else if viewport.repaint_delay < Duration::from_secs(3600) {
-        Some(Some(Instant::now() + viewport.repaint_delay))
+    } else if delay < Duration::from_secs(3600) {
+        Some(Some(Instant::now() + delay))
     } else {
         None
     }

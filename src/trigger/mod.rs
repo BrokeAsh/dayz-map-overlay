@@ -8,9 +8,10 @@
 use anyhow::{Context, Result, bail};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
+    self, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -19,116 +20,250 @@ use crate::config::Config;
 /// XIAllDevices. XWayland reports raw events from the physical (slave) devices only.
 const ALL_DEVICES: u16 = 0;
 
+/// How often to try again while XWayland isn't there: not started yet when the overlay
+/// autostarts, or restarting after a crash (Wine can take it down).
+const RECONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Where the game window is, to open the overlay on its monitor.
+#[derive(Debug, Clone)]
+pub struct GameSpot {
+    /// Its centre, in X11 screen coordinates (which differ from Wayland's when XWayland is
+    /// scaled).
+    pub center: (i32, i32),
+    /// The monitor's output name (`DP-1`), which XWayland shares with Wayland.
+    pub monitor: Option<String>,
+}
+
 /// Starts the listener thread; `on_press` runs for each hotkey press in a matching window, with
-/// the centre of that window in global screen coordinates (to open the overlay on its monitor).
-/// `on_unfocus` runs when focus moves from a matching window to anything else.
+/// where that window is.
+/// `on_unfocus` runs when focus moves from a matching window to anything else. Fails only for a
+/// hotkey that can't be understood; without XWayland it keeps trying in the background.
 pub fn spawn(
     config: &Config,
-    on_press: impl Fn(Option<(i32, i32)>) + Send + 'static,
+    on_press: impl Fn(Option<GameSpot>) + Send + 'static,
     on_unfocus: impl Fn() + Send + 'static,
 ) -> Result<()> {
     let keysym = parse_keysym(&config.hotkey)?;
+    let name = config.hotkey.clone();
     let patterns: Vec<String> = config
         .window_match
         .iter()
         .map(|p| p.to_lowercase())
         .collect();
-    let (conn, screen) = RustConnection::connect(None).context("connecting to XWayland")?;
-    let root = conn.setup().roots[screen].root;
-    let version = conn
-        .xinput_xi_query_version(2, 2)?
-        .reply()
-        .context("XInput2 is not available")?;
-    log::debug!("XInput {}.{}", version.major_version, version.minor_version);
+    let matches = move |window: &str| window_matches(&patterns, window);
+    // The first try here, so a problem shows in the log before anything else happens.
+    let mut next = Listener::connect(keysym, &name);
+    std::thread::Builder::new()
+        .name("hotkey".into())
+        .spawn(move || {
+            let mut failing: Option<String> = None;
+            loop {
+                match next {
+                    Ok(listener) => {
+                        failing = None;
+                        log::info!("listening for the hotkey");
+                        let e = listener.listen(&matches, &on_press, &on_unfocus);
+                        log::warn!("lost the XWayland connection: {e:#}; reconnecting");
+                    }
+                    Err(e) => {
+                        // Once per distinct problem, not every few seconds.
+                        let text = format!("{e:#}");
+                        if failing.as_ref() != Some(&text) {
+                            log::warn!(
+                                "hotkey not available yet: {text}. Trying again every few \
+                                 seconds; `dayz-map toggle` works meanwhile."
+                            );
+                            failing = Some(text);
+                        }
+                    }
+                }
+                std::thread::sleep(RECONNECT);
+                next = Listener::connect(keysym, &name);
+            }
+        })?;
+    Ok(())
+}
 
-    let keycodes = Keycodes::load(&conn)?;
+/// A connection to XWayland set up to report the hotkey and focus changes.
+struct Listener {
+    conn: RustConnection,
+    root: Window,
+    keysym: u32,
+    /// The hotkey as configured, for messages.
+    name: String,
+    hotkey: Vec<u32>,
+    /// Modifier bits that stop the hotkey (Ctrl, Alt, Super).
+    blocking: u16,
+    atoms: Atoms,
+}
+
+impl Listener {
+    fn connect(keysym: u32, name: &str) -> Result<Self> {
+        let (conn, screen) = RustConnection::connect(None).context("connecting to XWayland")?;
+        let root = conn.setup().roots[screen].root;
+        let version = conn
+            .xinput_xi_query_version(2, 2)?
+            .reply()
+            .context("XInput2 is not available")?;
+        log::debug!("XInput {}.{}", version.major_version, version.minor_version);
+
+        let (hotkey, blocking) = keys(&conn, keysym, name)?;
+
+        conn.xinput_xi_select_events(
+            root,
+            &[xinput::EventMask {
+                deviceid: ALL_DEVICES,
+                mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
+            }],
+        )?
+        .check()
+        .context("selecting XInput2 raw key events")?;
+        let atoms = Atoms::new(&conn)?;
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )?
+        .check()
+        .context("watching the focused window")?;
+        Ok(Self {
+            conn,
+            root,
+            keysym,
+            name: name.to_string(),
+            hotkey,
+            blocking,
+            atoms,
+        })
+    }
+
+    /// Handles events until the connection breaks.
+    fn listen(
+        &self,
+        matches: &dyn Fn(&str) -> bool,
+        on_press: &dyn Fn(Option<GameSpot>),
+        on_unfocus: &dyn Fn(),
+    ) -> anyhow::Error {
+        let Self {
+            conn,
+            root,
+            keysym,
+            name,
+            hotkey,
+            blocking,
+            atoms,
+        } = self;
+        let (root, keysym) = (*root, *keysym);
+        // Updated when the keyboard layout changes (the hotkey's letter may move).
+        let (mut hotkey, mut blocking) = (hotkey.clone(), *blocking);
+        let mut game_focused = matches(&atoms.active_window(conn, root).0);
+        loop {
+            let event = match conn.wait_for_event() {
+                Ok(event) => event,
+                Err(e) => {
+                    // The game went down with XWayland (Wine can take it with it): don't leave
+                    // the map open over the desktop.
+                    if game_focused {
+                        on_unfocus();
+                    }
+                    return e.into();
+                }
+            };
+            match event {
+                // A master device repeats its slave's event; count each press once.
+                Event::XinputRawKeyPress(e) if e.deviceid == e.sourceid => {
+                    let repeat = e.flags.contains(xinput::KeyEventFlags::KEY_REPEAT);
+                    if !hotkey.contains(&e.detail) || repeat {
+                        continue;
+                    }
+                    // Ask the server rather than tracking presses: a release made while
+                    // another window had focus (Alt+Tab out of the game) is never seen here.
+                    let mods = conn
+                        .query_pointer(root)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .map_or(0, |r| u16::from(r.mask));
+                    if mods & blocking != 0 {
+                        log::info!("hotkey ignored: Ctrl, Alt or Super is held");
+                        continue;
+                    }
+                    let (window, center) = atoms.active_window(conn, root);
+                    let matches = matches(&window);
+                    log::info!(
+                        "hotkey in {window:?}: {}",
+                        if matches {
+                            "toggling the map"
+                        } else {
+                            "not the game"
+                        }
+                    );
+                    if matches {
+                        on_press(center.map(|center| GameSpot {
+                            center,
+                            monitor: monitor_at(conn, root, center),
+                        }));
+                    }
+                }
+                Event::MappingNotify(e) if e.request != xproto::Mapping::POINTER => {
+                    match keys(conn, keysym, name) {
+                        Ok(keys) => (hotkey, blocking) = keys,
+                        // Keep the old keys: the new layout may lack the letter for now.
+                        Err(e) => log::warn!("keyboard layout changed: {e:#}"),
+                    }
+                }
+                Event::PropertyNotify(e) if e.atom == atoms.active_window => {
+                    let focused = matches(&atoms.active_window(conn, root).0);
+                    if game_focused && !focused {
+                        on_unfocus();
+                    }
+                    game_focused = focused;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether a window ("<instance> <class> | <title>", lower-case) is the game. A pattern naming
+/// a program (`dayz_x64.exe`, the window class under Wine) matches only that class, not a title
+/// that mentions it (a browser page about a crash, say); others match the class or the title.
+fn window_matches(patterns: &[String], window: &str) -> bool {
+    let classes = window.split_once(" | ").map_or(window, |(c, _)| c);
+    patterns.is_empty()
+        || patterns.iter().any(|p| {
+            if p.ends_with(".exe") {
+                classes.split(' ').any(|c| c == p)
+            } else {
+                window.contains(p.as_str())
+            }
+        })
+}
+
+/// The keycodes that type `keysym` in the current layout, and the modifier bits that stop the
+/// hotkey.
+fn keys(conn: &RustConnection, keysym: u32, name: &str) -> Result<(Vec<u32>, u16)> {
+    let keycodes = Keycodes::load(conn)?;
     let hotkey = keycodes.find(keysym);
     log::debug!("hotkey keycodes {hotkey:?}");
     if hotkey.is_empty() {
-        bail!("no key on the keyboard produces {:?}", config.hotkey);
+        bail!("no key on the keyboard produces {name:?}");
     }
     // Ctrl, Alt and Super combinations are left alone; Shift is allowed (it's sprint in DayZ).
     let blocking: Vec<u32> = [0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec, 0xfe03]
         .into_iter()
         .flat_map(|k| keycodes.find(k))
         .collect();
-    let blocking = modifier_mask(&conn, &blocking)?;
+    Ok((hotkey, modifier_mask(conn, &blocking)?))
+}
 
-    conn.xinput_xi_select_events(
-        root,
-        &[xinput::EventMask {
-            deviceid: ALL_DEVICES,
-            mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
-        }],
-    )?
-    .check()
-    .context("selecting XInput2 raw key events")?;
-    let atoms = Atoms::new(&conn)?;
-    conn.change_window_attributes(
-        root,
-        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    )?
-    .check()
-    .context("watching the focused window")?;
-    let matches =
-        move |window: &str| patterns.is_empty() || patterns.iter().any(|p| window.contains(p));
-
-    std::thread::Builder::new()
-        .name("hotkey".into())
-        .spawn(move || {
-            let mut game_focused = matches(&atoms.active_window(&conn, root).0);
-            loop {
-                let event = match conn.wait_for_event() {
-                    Ok(event) => event,
-                    Err(e) => {
-                        log::error!("lost the XWayland connection: {e}");
-                        return;
-                    }
-                };
-                match event {
-                    // A master device repeats its slave's event; count each press once.
-                    Event::XinputRawKeyPress(e) if e.deviceid == e.sourceid => {
-                        let repeat = e.flags.contains(xinput::KeyEventFlags::KEY_REPEAT);
-                        if !hotkey.contains(&e.detail) || repeat {
-                            continue;
-                        }
-                        // Ask the server rather than tracking presses: a release made while
-                        // another window had focus (Alt+Tab out of the game) is never seen here.
-                        let mods = conn
-                            .query_pointer(root)
-                            .ok()
-                            .and_then(|c| c.reply().ok())
-                            .map_or(0, |r| u16::from(r.mask));
-                        if mods & blocking != 0 {
-                            log::info!("hotkey ignored: Ctrl, Alt or Super is held");
-                            continue;
-                        }
-                        let (window, center) = atoms.active_window(&conn, root);
-                        let matches = matches(&window);
-                        log::info!(
-                            "hotkey in {window:?}: {}",
-                            if matches {
-                                "toggling the map"
-                            } else {
-                                "not the game"
-                            }
-                        );
-                        if matches {
-                            on_press(center);
-                        }
-                    }
-                    Event::PropertyNotify(e) if e.atom == atoms.active_window => {
-                        let focused = matches(&atoms.active_window(&conn, root).0);
-                        if game_focused && !focused {
-                            on_unfocus();
-                        }
-                        game_focused = focused;
-                    }
-                    _ => {}
-                }
-            }
-        })?;
-    Ok(())
+/// The name of the monitor (RandR 1.5) containing a point.
+fn monitor_at(conn: &RustConnection, root: Window, (x, y): (i32, i32)) -> Option<String> {
+    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
+    let monitor = reply.monitors.iter().find(|m| {
+        (i32::from(m.x)..i32::from(m.x) + i32::from(m.width)).contains(&x)
+            && (i32::from(m.y)..i32::from(m.y) + i32::from(m.height)).contains(&y)
+    })?;
+    let name = conn.get_atom_name(monitor.name).ok()?.reply().ok()?.name;
+    Some(String::from_utf8_lossy(&name).into_owned())
 }
 
 /// The modifier-state bits (Mod1, Mod4, ...) that any of `keycodes` sets.
@@ -151,8 +286,10 @@ fn modifier_mask(conn: &RustConnection, keycodes: &[u32]) -> Result<u16> {
 fn parse_keysym(name: &str) -> Result<u32> {
     let lower = name.trim().to_lowercase();
     let mut chars = lower.chars();
+    // Latin-1 keysyms are the character itself (`ö` is 0xf6). Other scripts' letters have
+    // older keysyms in X keymaps (Cyrillic `щ` is 0x6dd), so those are given as keysyms.
     if let (Some(c), None) = (chars.next(), chars.next())
-        && c.is_ascii_graphic()
+        && (c.is_ascii_graphic() || ('\u{a1}'..='\u{ff}').contains(&c))
     {
         return Ok(c as u32);
     }
@@ -170,7 +307,10 @@ fn parse_keysym(name: &str) -> Result<u32> {
         "tab" => Ok(0xff09),
         "grave" | "backtick" => Ok(0x60),
         _ => {
-            bail!("unknown hotkey {name:?}; use a single character, f1-f24, or a keysym like 0x6d")
+            bail!(
+                "unknown hotkey {name:?}; use a single Latin character, f1-f24, or a keysym \
+                 like 0x6d"
+            )
         }
     }
 }
@@ -193,15 +333,29 @@ impl Keycodes {
         })
     }
 
-    /// Keycodes whose unshifted or shifted symbol is `keysym` (letters match either case).
+    /// Keycodes whose unshifted or shifted symbol is `keysym` (letters match either case) in
+    /// the first layout, or else the second: with `ru,us`, the Latin letters are in the second.
     fn find(&self, keysym: u32) -> Vec<u32> {
         let lower = char::from_u32(keysym).map_or(keysym, |c| c.to_ascii_lowercase() as u32);
-        self.keysyms
-            .chunks(self.per_keycode.max(1))
-            .enumerate()
-            .filter(|(_, syms)| syms.iter().take(2).any(|&s| s == keysym || s == lower))
-            .map(|(i, _)| u32::from(self.min) + i as u32)
-            .collect()
+        let in_layout = |layout: usize| -> Vec<u32> {
+            self.keysyms
+                .chunks(self.per_keycode.max(1))
+                .enumerate()
+                .filter(|(_, syms)| {
+                    syms.iter()
+                        .skip(layout * 2)
+                        .take(2)
+                        .any(|&s| s == keysym || s == lower)
+                })
+                .map(|(i, _)| u32::from(self.min) + i as u32)
+                .collect()
+        };
+        let first = in_layout(0);
+        if first.is_empty() {
+            in_layout(1)
+        } else {
+            first
+        }
     }
 }
 
@@ -222,7 +376,8 @@ impl Atoms {
         })
     }
 
-    /// Lower-cased "class instance title" of the focused X11 window (or empty), and its centre.
+    /// Lower-case "<instance> <class> | <title>" of the focused X11 window (or empty), and its
+    /// centre.
     fn active_window(&self, conn: &RustConnection, root: Window) -> (String, Option<(i32, i32)>) {
         let property = |window: Window, name: u32, kind: u32| -> Option<Vec<u8>> {
             let reply = conn
@@ -256,20 +411,52 @@ impl Atoms {
                     i32::from(origin.dst_y) + i32::from(geometry.height) / 2,
                 ))
             });
-        let mut parts = Vec::new();
+        let mut classes = Vec::new();
         if let Some(class) = property(window, AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into()) {
-            parts.extend(
+            classes.extend(
                 class
                     .split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
                     .map(|s| String::from_utf8_lossy(s).into_owned()),
             );
         }
         let title = property(window, self.net_wm_name, self.utf8_string)
             .filter(|t| !t.is_empty())
-            .or_else(|| property(window, AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()));
-        if let Some(title) = title {
-            parts.push(String::from_utf8_lossy(&title).into_owned());
-        }
-        (parts.join(" ").trim().to_lowercase(), center)
+            .or_else(|| property(window, AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()))
+            .map(|t| String::from_utf8_lossy(&t).into_owned())
+            .unwrap_or_default();
+        // "<instance> <class> | <title>": classes never contain " | ", so `matches` can tell
+        // them from the title.
+        (
+            format!("{} | {title}", classes.join(" ")).to_lowercase(),
+            center,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn game_windows() {
+        let patterns = ["steam_app_221100".to_string(), "dayz_x64.exe".to_string()];
+        let matches = |w: &str| super::window_matches(&patterns, w);
+        assert!(matches("steam_app_221100 steam_app_221100 | dayz"));
+        assert!(matches("dayz_x64.exe dayz_x64.exe | dayz"));
+        assert!(!matches(
+            "firefox firefox | dayz_x64.exe crashed - mozilla firefox"
+        ));
+        assert!(!matches("firefox firefox | dayz wiki"));
+    }
+
+    #[test]
+    fn hotkey_names() {
+        use super::parse_keysym;
+        assert_eq!(parse_keysym("m").unwrap(), 0x6d);
+        assert_eq!(parse_keysym("M").unwrap(), 0x6d);
+        assert_eq!(parse_keysym("Ö").unwrap(), 0xf6);
+        assert!(parse_keysym("щ").is_err());
+        assert_eq!(parse_keysym("f12").unwrap(), 0xffc9);
+        assert_eq!(parse_keysym("0x6d").unwrap(), 0x6d);
+        assert!(parse_keysym("nonsense").is_err());
     }
 }

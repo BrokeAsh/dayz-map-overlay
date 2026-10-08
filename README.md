@@ -37,11 +37,13 @@ stay, such as `%LOCALAPPDATA%\Programs\dayz-map`. Then, in a terminal in that fo
 ```powershell
 .\dayz-map status          # check that it found DayZ, the Workshop folder and the logs
 .\dayz-map autostart on    # start when you sign in (`off` to undo)
-.\dayz-map                 # or start it now (double-clicking dayz-map.exe works too)
+start .\dayz-map.exe      # or start it now (double-clicking dayz-map.exe works too)
 ```
 
-The overlay runs without a window of its own; `dayz-map quit` stops it. Its log is
-`%APPDATA%\dayz-map-overlay\data\dayz-map.log`. The program isn't signed yet, so SmartScreen may
+Started that way (or at sign-in), the overlay runs in the background without a window of its
+own and logs to `%APPDATA%\dayz-map-overlay\data\dayz-map.log`; `dayz-map quit` stops it.
+Started as plain `.\dayz-map`, it stays in that terminal and logs there instead, and closing the
+terminal stops it. The program isn't signed yet, so SmartScreen may
 warn the first time you run it.
 
 ### Linux
@@ -60,8 +62,8 @@ dayz-map &               # or start it now
 `~/.local/bin` must be on your `PATH` for the short commands; the autostart entry uses the full
 path either way.
 
-To build it yourself, install Rust and the Wayland and xkbcommon development packages
-(`libwayland-dev libxkbcommon-dev` on Debian and Ubuntu), then run `cargo build --release`.
+To build it yourself, install Rust (1.95 or newer) and the Wayland and xkbcommon development packages
+(`libwayland-dev libxkbcommon-dev pkg-config` on Debian and Ubuntu), then run `cargo build --release`.
 
 ## Use
 
@@ -114,7 +116,8 @@ the one the server loads wins. A map is rebuilt when its mod updates. Maps are s
 `~/.local/share/dayz-map-overlay/maps/<world>/` (on Windows,
 `%APPDATA%\dayz-map-overlay\data\maps\<world>\`), about 40–80 MB and one or two seconds each.
 
-For a terrain whose files can't be read, import a picture of the whole map, north up:
+For a terrain whose files can't be read, import a picture of the whole map, north up (at most
+16384 px across):
 
 ```sh
 dayz-map import-image mymap mymap.png --world-size 12800 --name "My Map"
@@ -143,8 +146,12 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 `%APPDATA%\dayz-map-overlay\config\config.toml`) is written when the overlay closes:
 
 ```toml
-hotkey = "m"                                  # a character, f1–f24, or a keysym like 0x6d
-window_match = ["steam_app_221100", "DayZ"]   # opens only when the focused window matches
+hotkey = "m"                                  # a character or f1–f24 (on Linux: a Latin character such as ö,
+                                              # or a keysym like 0x6d for other scripts)
+window_match = ["steam_app_221100", "dayz_x64.exe"]  # opens only when the focused window's
+                                              # class or title contains one; one ending in .exe
+                                              # must be the program itself (Windows default:
+                                              # ["dayz_x64.exe"])
 # game_dir = "/path/to/steamapps/common/DayZ" # only if DayZ isn't found automatically
 # log_dir = "/path/to/DayZ/logs"              # only if `dayz-map status` can't find the logs
 
@@ -169,11 +176,19 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 - **M does nothing (Windows):** check that DayZ is in borderless or windowed mode, then look in
   `dayz-map.log` (see [Install](#windows)). It logs `hotkey in "…": toggling the map` for every
   press while the overlay runs; `…: not the game` means `window_match` doesn't match the game's
-  window (the text in quotes is what to match).
+  window (the text in quotes is what to match). If DayZ runs as administrator, the overlay must
+  too: Windows doesn't pass keys from an elevated window to a normal one.
 - **M does nothing (Linux):** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
   `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
   it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a
-  workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings.
+  workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings. The overlay
+  then can't tell when you switch away from the game, so close it with the same key. If it logs
+  `hotkey ignored: DayZ itself isn't running`, check that `dayz-map status` shows the game
+  running (M does nothing in the launcher on purpose).
+- **Scrolling doesn't zoom (Windows):** turn on "Scroll inactive windows when I hover over
+  them" in Settings > Bluetooth & devices > Mouse (Windows 10: Settings > Devices > Mouse; on by
+  default). The overlay never takes focus
+  from the game, so Windows only sends it the wheel with that setting.
 - **The map doesn't follow the server:** `dayz-map status` should show a Logs folder and, while
   you're on a server, the map and server name.
 - **A map is missing:** `dayz-map list` shows every terrain found; Rescan in the Maps window

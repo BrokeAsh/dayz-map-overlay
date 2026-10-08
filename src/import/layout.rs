@@ -26,7 +26,8 @@ impl TileLayout {
     pub fn from_rvmats(pbo: &Pbo) -> Result<Self> {
         let origin = world_uv_transform(pbo, "p_000-000")?;
         let next = world_uv_transform(pbo, "p_001-000")?;
-        if origin.aside <= 0.0 || origin.dir_v == 0.0 {
+        // (Written so NaN fails too.)
+        if !(origin.aside > 0.0 && origin.aside.is_finite()) || !(origin.dir_v != 0.0) {
             bail!("unexpected uvTransform in {}", pbo.path.display());
         }
         let tile_m = 1.0 / origin.aside;
@@ -35,12 +36,19 @@ impl TileLayout {
             bail!("tiles overlap unexpectedly (step {step_frac})");
         }
         let overlap_frac = (1.0 - step_frac) / 2.0;
-        Ok(Self {
+        let layout = Self {
             overlap_frac,
             step_m: step_frac * tile_m,
             left: (overlap_frac - origin.pos_u) * tile_m,
             top: (overlap_frac - origin.pos_v) / origin.dir_v,
-        })
+        };
+        if ![layout.step_m, layout.left, layout.top]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            bail!("unexpected uvTransform in {}", pbo.path.display());
+        }
+        Ok(layout)
     }
 
     /// The north-east extent of the tile grid.

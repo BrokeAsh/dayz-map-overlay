@@ -2,6 +2,7 @@
 name = "dayz-map"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "See-through DayZ map overlay that follows the server you're on"
 repository = "https://github.com/BrokeAsh/dayz-map-overlay"
 readme = "README.md"
@@ -18,7 +19,6 @@ egui-wgpu = "0.36"
 env_logger = "0.11.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 log = "0.4.34"
-lzokay-native = "0.1.0"
 pollster = "1.0.1"
 raw-window-handle = "0.6"
 rfd = "0.17"
@@ -31,7 +31,7 @@ toml = "1.1.6"
 libc = "0.2"
 smithay-client-toolkit = "0.21"
 wayland-client = { version = "0.31", features = ["system"] }
-x11rb = { version = "0.14", features = ["xinput"] }
+x11rb = { version = "0.14", features = ["randr", "xinput"] }
 
 [target.'cfg(windows)'.dependencies]
 egui-winit = { version = "0.36", default-features = false }
@@ -43,6 +43,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
