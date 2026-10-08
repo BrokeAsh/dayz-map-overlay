@@ -128,8 +128,9 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     Ok(MapPack { meta, dir })
 }
 
-/// Rebuilds only the points of interest of an imported map.
-pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
+/// Rebuilds only the points of interest of an imported map; returns whether it did (another
+/// import may have done it meanwhile).
+pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<bool> {
     let (_lock, _) = ImportLock::take(&pack.dir)?;
     // Another import may have rewritten it since it was loaded, maybe from another copy of the
     // terrain (an experimental build): leave that one's points of interest alone.
@@ -137,12 +138,12 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     if !source.is_current(&current) {
         log::info!("{} was reimported meanwhile", current.meta.name);
         *pack = current;
-        return Ok(());
+        return Ok(false);
     }
     if current.meta.pois_source == source.pois_fingerprint() {
         // Done by another import meanwhile; saving again would only make the overlay reload.
         *pack = current;
-        return Ok(());
+        return Ok(false);
     }
     let old = current.meta.clone();
     let mut meta = current.meta;
@@ -153,7 +154,7 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     written.keep();
     maps::remove_unused(&pack.dir, Some(&old), &meta);
     pack.meta = meta;
-    Ok(())
+    Ok(true)
 }
 
 /// Writes a new points-of-interest file (unused until map.toml names it), deleted again unless

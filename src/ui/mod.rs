@@ -219,6 +219,8 @@ impl OverlayApp {
         if self.maps_checked.elapsed() > Duration::from_secs(2) {
             self.reload_if_changed();
         }
+        // Looked for again in a moment even if nothing else happens.
+        ui.ctx().request_repaint_after(Duration::from_secs(2));
         let ctx = ui.ctx().clone();
         let screen = ui.max_rect();
         self.tiles.begin_frame(&ctx);

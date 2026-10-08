@@ -183,7 +183,8 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
   workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings. The overlay
   then can't tell when you switch away from the game, so close it with the same key.
 - **Scrolling doesn't zoom (Windows):** turn on "Scroll inactive windows when I hover over
-  them" in Settings > Bluetooth & devices > Mouse (on by default). The overlay never takes focus
+  them" in Settings > Bluetooth & devices > Mouse (Windows 10: Settings > Devices > Mouse; on by
+  default). The overlay never takes focus
   from the game, so Windows only sends it the wheel with that setting.
 - **The map doesn't follow the server:** `dayz-map status` should show a Logs folder and, while
   you're on a server, the map and server name.

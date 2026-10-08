@@ -238,7 +238,8 @@ impl Worker {
         }
         log::info!("updating the points of interest of {}", pack.meta.name);
         match import::refresh_pois(source, pack) {
-            Ok(()) => self.update(|s| s.generation += 1),
+            // Reloaded even if another import did it: the map on disk changed either way.
+            Ok(_) => self.update(|s| s.generation += 1),
             Err(e) => log::warn!("{}: {e:#}", pack.meta.name),
         }
     }

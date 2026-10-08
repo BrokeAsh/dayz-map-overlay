@@ -458,7 +458,10 @@ fn import_one(world: &import::catalog::WorldSource) -> Result<()> {
             println!("{} is up to date", world.name);
             return Ok(());
         }
-        import::refresh_pois(world, &mut pack)?;
+        if !import::refresh_pois(world, &mut pack)? {
+            println!("{} is up to date", world.name);
+            return Ok(());
+        }
         println!(
             "{} is up to date; rebuilt its points of interest in {:.0?}",
             world.name,

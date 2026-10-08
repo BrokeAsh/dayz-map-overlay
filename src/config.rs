@@ -138,14 +138,16 @@ impl Config {
         std::fs::create_dir_all(path.parent().unwrap())?;
         // (Only while the file on disk is still the unreadable one: after the first save, it's
         // ours.)
-        let still_unreadable = || {
-            std::fs::read(&path).is_ok_and(|bytes| {
-                std::str::from_utf8(&bytes).map_or(true, |text| {
-                    toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).is_err()
-                })
-            })
+        let still_unreadable = || match std::fs::read(&path) {
+            Ok(bytes) => Ok(std::str::from_utf8(&bytes).map_or(true, |text| {
+                toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).is_err()
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            // Not even readable (owned by root after a `sudo` edit, say): there'd be no copy.
+            Err(e) => Err(e)
+                .with_context(|| format!("can't read {}, so leaving it as it is", path.display())),
         };
-        if self.unreadable && still_unreadable() {
+        if self.unreadable && still_unreadable()? {
             let backup = path.with_extension("toml.bak");
             std::fs::copy(&path, &backup)
                 .with_context(|| format!("keeping a copy of {}", path.display()))?;
