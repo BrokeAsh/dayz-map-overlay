@@ -11,6 +11,27 @@ doesn't read or change the game's memory: it reads the game's files and logs, dr
 window above the game, and listens for the hotkey like any other desktop app (see
 [Anti-cheat](#anti-cheat)).
 
+<p align="center">
+  <img src="docs/screenshots/overview.jpg" width="49%" alt="Chernarus with the default layers">
+  <img src="docs/screenshots/deer-isle.jpg" width="49%" alt="The Deer Isle Workshop map">
+</p>
+
+## Screenshots
+
+Taken without the game running behind the map. In game, DayZ shows through it.
+
+Zoomed in on Chernogorsk with a few more layers on. Hovering a marker names the building:
+
+![Chernogorsk up close, with a tooltip on the city hospital](docs/screenshots/town.jpg)
+
+The Layers menu:
+
+![The Layers menu, listing each kind of point of interest with its count](docs/screenshots/layers.jpg)
+
+The Maps window, listing the maps found in the game and Workshop folders:
+
+![The Maps window, with View for imported maps and Import for the rest](docs/screenshots/maps.jpg)
+
 ## Requirements
 
 Windows:
