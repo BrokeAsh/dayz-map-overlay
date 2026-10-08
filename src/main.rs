@@ -408,7 +408,7 @@ fn import(config: &Config, worlds: &[String], all: bool) -> Result<()> {
     for world in &selected {
         let start = std::time::Instant::now();
         if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
-            && pack.meta.source == world.fingerprint()
+            && world.is_current(&pack)
         {
             import::refresh_pois(world, &mut pack)?;
             println!(

@@ -1,6 +1,20 @@
 //! Platform windowing for the overlay.
 
 mod gpu;
+
+/// Starts a fresh copy of the overlay (after the graphics device was lost). Called once this
+/// one has let go of the control channel and instance lock.
+fn restart() {
+    log::info!("restarting the overlay");
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(e) = std::process::Command::new(exe).arg("run").spawn() {
+                log::error!("restarting the overlay: {e}");
+            }
+        }
+        Err(e) => log::error!("restarting the overlay: {e}"),
+    }
+}
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(windows)]

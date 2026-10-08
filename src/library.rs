@@ -136,6 +136,8 @@ impl Worker {
         self.update(|s| {
             s.scanning = false;
             s.catalog = Some(catalog.clone());
+            // Also picks up maps another program installed (`dayz-map import-image`).
+            s.generation += 1;
         });
         catalog
     }
@@ -176,17 +178,16 @@ impl Worker {
             return;
         };
         match maps::load(&maps::maps_dir().join(&source.id)) {
-            // (A mod update can resize the terrain without touching its tiles.)
-            Ok(mut pack)
-                if pack.meta.source == source.fingerprint()
-                    && source
-                        .world_size
-                        .is_none_or(|size| (size.round() - pack.meta.world_size).abs() < 1.0) =>
-            {
+            Ok(mut pack) if source.is_current(&pack) => {
                 self.refresh_pois(&source, &mut pack);
                 self.update(|s| s.ready = Some(source.id.clone()));
             }
-            _ => self.import(&source, true),
+            installed => {
+                // An installed picture still works if the terrain's own files don't.
+                if !self.import(&source, true) && installed.is_ok() {
+                    self.update(|s| s.ready = Some(source.id.clone()));
+                }
+            }
         }
     }
 
@@ -202,7 +203,8 @@ impl Worker {
         }
     }
 
-    fn import(&self, source: &WorldSource, show: bool) {
+    /// Imports a world; returns whether it worked.
+    fn import(&self, source: &WorldSource, show: bool) -> bool {
         let job = |done, total| Job {
             id: source.id.clone(),
             name: source.name.clone(),
@@ -217,6 +219,7 @@ impl Worker {
             self.state.lock().unwrap().job = Some(job(p.done, p.total));
             self.ctx.request_repaint();
         });
+        let ok = result.is_ok();
         self.update(|s| {
             s.job = None;
             s.generation += 1;
@@ -232,6 +235,7 @@ impl Worker {
                 }
             }
         });
+        ok
     }
 
     /// Rebuilds maps imported by an older version (for example, before points of interest).

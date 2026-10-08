@@ -40,7 +40,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "m".into(),
-            window_match: vec!["steam_app_221100".into(), "DayZ".into()],
+            // On Windows, the game's executable: a title containing "DayZ" could be a browser
+            // tab or a chat channel.
+            window_match: if cfg!(windows) {
+                vec!["dayz_x64.exe".into()]
+            } else {
+                vec!["steam_app_221100".into(), "DayZ".into()]
+            },
             game_dir: None,
             log_dir: None,
             view: ViewConfig::default(),
@@ -103,7 +109,12 @@ impl Config {
     pub fn save_from_overlay(&self, game_dir_picked: bool) -> Result<()> {
         let mut on_disk = Self::load();
         if on_disk.unreadable {
-            return self.save();
+            // Broken since the overlay started: keep a copy before replacing it.
+            return Self {
+                unreadable: true,
+                ..self.clone()
+            }
+            .save();
         }
         on_disk.view = self.view.clone();
         if game_dir_picked {

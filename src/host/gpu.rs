@@ -12,6 +12,8 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// Created with the first surface, once the output format is known.
     renderer: Option<(egui_wgpu::Renderer, wgpu::TextureFormat)>,
+    /// Set when the device is lost (a driver reset or update); nothing can draw after that.
+    lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What happened to a frame.
@@ -36,13 +38,25 @@ impl Gpu {
                 label: Some("dayz-map"),
                 ..Default::default()
             }))?;
+        let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("the graphics device was lost ({reason:?}): {message}");
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
             renderer: None,
+            lost,
         })
+    }
+
+    /// Whether the device is gone, so the overlay has to start over to draw again.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Sizes the surface (in pixels) for see-through drawing.

@@ -240,6 +240,9 @@ fn build_layer(
     if work_dir.exists() {
         std::fs::remove_dir_all(&work_dir)?;
     }
+    // Removed if anything below fails (or panics); a map with a bad tile would otherwise leave
+    // hundreds of MB behind on every attempt.
+    let mut work = RemoveOnDrop(Some(work_dir.clone()));
     for level in 0..=max_level {
         std::fs::create_dir_all(work_dir.join(level.to_string()))?;
     }
@@ -294,7 +297,19 @@ fn build_layer(
         std::fs::remove_dir_all(&final_dir)?;
     }
     std::fs::rename(&work_dir, &final_dir)?;
+    work.0 = None;
     Ok(meta)
+}
+
+/// A folder to delete when dropped, unless taken out first.
+struct RemoveOnDrop(Option<std::path::PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 fn grid_coords(grid: u32) -> impl Iterator<Item = (u32, u32)> {

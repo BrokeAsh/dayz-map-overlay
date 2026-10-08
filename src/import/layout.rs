@@ -36,12 +36,19 @@ impl TileLayout {
             bail!("tiles overlap unexpectedly (step {step_frac})");
         }
         let overlap_frac = (1.0 - step_frac) / 2.0;
-        Ok(Self {
+        let layout = Self {
             overlap_frac,
             step_m: step_frac * tile_m,
             left: (overlap_frac - origin.pos_u) * tile_m,
             top: (overlap_frac - origin.pos_v) / origin.dir_v,
-        })
+        };
+        if ![layout.step_m, layout.left, layout.top]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            bail!("unexpected uvTransform in {}", pbo.path.display());
+        }
+        Ok(layout)
     }
 
     /// The north-east extent of the tile grid.

@@ -128,6 +128,10 @@ impl OverlayApp {
     }
 
     fn select(&mut self, id: &str) {
+        // Maybe installed since the list was read (by `dayz-map import-image`, say).
+        if !self.maps.iter().any(|m| m.meta.id == id) {
+            self.reload_maps();
+        }
         if let Some(i) = self.maps.iter().position(|m| m.meta.id == id) {
             self.current = Some(i);
             self.config.view.map = Some(id.to_string());

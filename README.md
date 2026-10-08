@@ -37,11 +37,13 @@ stay, such as `%LOCALAPPDATA%\Programs\dayz-map`. Then, in a terminal in that fo
 ```powershell
 .\dayz-map status          # check that it found DayZ, the Workshop folder and the logs
 .\dayz-map autostart on    # start when you sign in (`off` to undo)
-.\dayz-map                 # or start it now (double-clicking dayz-map.exe works too)
+start .\dayz-map.exe      # or start it now (double-clicking dayz-map.exe works too)
 ```
 
-The overlay runs without a window of its own; `dayz-map quit` stops it. Its log is
-`%APPDATA%\dayz-map-overlay\data\dayz-map.log`. The program isn't signed yet, so SmartScreen may
+Started that way (or at sign-in), the overlay runs in the background without a window of its
+own and logs to `%APPDATA%\dayz-map-overlay\data\dayz-map.log`; `dayz-map quit` stops it.
+Started as plain `.\dayz-map`, it stays in that terminal and logs there instead, and closing the
+terminal stops it. The program isn't signed yet, so SmartScreen may
 warn the first time you run it.
 
 ### Linux
@@ -145,6 +147,7 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 ```toml
 hotkey = "m"                                  # a character or f1–f24 (on Linux, also a keysym like 0x6d)
 window_match = ["steam_app_221100", "DayZ"]   # opens only when the focused window matches
+                                              # (on Windows: ["dayz_x64.exe"], the game's program)
 # game_dir = "/path/to/steamapps/common/DayZ" # only if DayZ isn't found automatically
 # log_dir = "/path/to/DayZ/logs"              # only if `dayz-map status` can't find the logs
 
@@ -169,7 +172,8 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 - **M does nothing (Windows):** check that DayZ is in borderless or windowed mode, then look in
   `dayz-map.log` (see [Install](#windows)). It logs `hotkey in "…": toggling the map` for every
   press while the overlay runs; `…: not the game` means `window_match` doesn't match the game's
-  window (the text in quotes is what to match).
+  window (the text in quotes is what to match). If DayZ runs as administrator, the overlay must
+  too: Windows doesn't pass keys from an elevated window to a normal one.
 - **M does nothing (Linux):** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
   `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
   it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a

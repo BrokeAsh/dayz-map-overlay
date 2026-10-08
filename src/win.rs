@@ -118,6 +118,21 @@ pub struct Foreground {
     pub ours: bool,
 }
 
+/// Stops background raw mouse input, which winit asks for along with the keyboard. Only the
+/// keyboard is needed (the hotkey), and a high-rate gaming mouse would otherwise wake the overlay
+/// thousands of times a second during play.
+pub fn stop_background_mouse() {
+    use windows_sys::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_REMOVE, RegisterRawInputDevices};
+    let mouse = RAWINPUTDEVICE {
+        usUsagePage: 1, // generic desktop
+        usUsage: 2,     // mouse
+        dwFlags: RIDEV_REMOVE,
+        hwndTarget: std::ptr::null_mut(),
+    };
+    // SAFETY: one valid entry, with its size.
+    unsafe { RegisterRawInputDevices(&mouse, 1, size_of::<RAWINPUTDEVICE>() as u32) };
+}
+
 /// The front window's handle (null if none), without the lookups `foreground` does.
 pub fn foreground_window() -> HWND {
     // SAFETY: a plain query.

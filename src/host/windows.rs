@@ -53,6 +53,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         .context("starting the window system")?;
     // Raw keyboard input while other windows are in front: the hotkey.
     event_loop.listen_device_events(DeviceEvents::Always);
+    win::stop_background_mouse();
     let proxy = event_loop.create_proxy();
 
     let ipc_proxy = proxy.clone();
@@ -112,6 +113,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         next_focus_check: Instant::now(),
         last_hide: Instant::now() - REOPEN_GRACE,
         fade: Fade::new(Some(FADE)),
+        outdated: 0,
+        restart: false,
         show_at_start: show,
         _proxy: proxy,
     };
@@ -120,6 +123,10 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         config.hotkey.to_uppercase()
     );
     event_loop.run_app(&mut host)?;
+    if host.restart {
+        drop(_control);
+        super::restart();
+    }
     Ok(())
 }
 
@@ -148,6 +155,10 @@ struct Host {
     next_focus_check: Instant,
     last_hide: Instant,
     fade: Fade,
+    /// Frames in a row that found the surface out of date.
+    outdated: u32,
+    /// Start over when the loop ends (the graphics device was lost).
+    restart: bool,
     show_at_start: bool,
     _proxy: EventLoopProxy<HostEvent>,
 }
@@ -223,17 +234,21 @@ impl Host {
             log::warn!("no monitor to show the overlay on");
             return;
         };
-        // SAFETY: positioning and showing our own window, without activating it.
-        unsafe {
-            SetWindowPos(
-                overlay.hwnd,
-                HWND_TOPMOST,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+        // SAFETY: positioning and showing our own window, without activating it. Twice: moving
+        // to a monitor with different scaling makes Windows rescale the window afterwards
+        // (WM_DPICHANGED); the second call, already on that monitor, sets the size for real.
+        for _ in 0..2 {
+            unsafe {
+                SetWindowPos(
+                    overlay.hwnd,
+                    HWND_TOPMOST,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
         }
         self.visible = true;
         self.follow_focus = follow_focus;
@@ -325,7 +340,13 @@ impl Host {
         }
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, event_loop: &ActiveEventLoop) {
+        if self.gpu.is_lost() {
+            self.hide();
+            self.restart = true;
+            event_loop.exit();
+            return;
+        }
         let Some(overlay) = self.window.as_mut() else {
             return;
         };
@@ -351,19 +372,28 @@ impl Host {
             .gpu
             .paint(&overlay.surface, &self.egui_ctx, output, opacity, || {})
         {
-            Frame::Presented if fading => window.request_redraw(),
-            Frame::Presented => {}
+            Frame::Presented if fading => {
+                self.outdated = 0;
+                window.request_redraw();
+            }
+            Frame::Presented => self.outdated = 0,
             Frame::Skipped => {
                 let at = Instant::now() + SKIPPED_RETRY;
                 self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
             }
             Frame::Outdated => {
+                self.outdated += 1;
                 let size = window.inner_size();
                 match self
                     .gpu
                     .configure(&overlay.surface, size.width, size.height)
                 {
-                    Ok(()) => window.request_redraw(),
+                    // Redraw right away after a resize, but don't spin if it keeps happening.
+                    Ok(()) if self.outdated <= 2 => window.request_redraw(),
+                    Ok(()) => {
+                        let at = Instant::now() + SKIPPED_RETRY;
+                        self.next_repaint = Some(self.next_repaint.map_or(at, |t| t.min(at)));
+                    }
                     Err(e) => log::error!("{e:#}"),
                 }
             }
@@ -412,13 +442,13 @@ impl ApplicationHandler<HostEvent> for Host {
         }
     }
 
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(overlay) = self.window.as_mut() else {
             return;
         };
         let response = overlay.input.on_window_event(&overlay.window, &event);
         match event {
-            WindowEvent::RedrawRequested => self.render(),
+            WindowEvent::RedrawRequested => self.render(event_loop),
             WindowEvent::Resized(size) => {
                 match self
                     .gpu

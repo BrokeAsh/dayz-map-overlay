@@ -140,11 +140,9 @@ impl Watcher {
             self.offset = 0;
             self.partial.clear();
         }
-        // A long modded session's log can be hundreds of MB; the latest mission is near the end.
-        let mut mid_line = false;
+        // A long modded session's log can be hundreds of MB: start at its latest mission.
         if self.offset == 0 && len > LOG_TAIL {
-            self.offset = len - LOG_TAIL;
-            mid_line = true;
+            self.offset = latest_mission(&mut file, len);
         }
         if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
             return Vec::new();
@@ -155,14 +153,6 @@ impl Watcher {
         }
         self.offset += bytes.len() as u64;
         self.partial.push_str(&String::from_utf8_lossy(&bytes));
-        if mid_line {
-            // Started partway through a line.
-            let rest = self
-                .partial
-                .find('\n')
-                .map_or(self.partial.len(), |i| i + 1);
-            self.partial.drain(..rest);
-        }
         let complete = self.partial.rfind('\n').map_or(0, |i| i + 1);
         let lines = self.partial[..complete]
             .lines()
@@ -205,6 +195,32 @@ impl Watcher {
     }
 }
 
+/// Where to start reading an existing script log: the line with its latest mission (searching
+/// backward a chunk at a time, so memory stays bounded), or the end if there's none.
+fn latest_mission(file: &mut std::fs::File, len: u64) -> u64 {
+    const MARK: &[u8] = b"Creating Mission:";
+    let mut end = len;
+    loop {
+        let start = end.saturating_sub(LOG_TAIL);
+        let mut chunk = vec![0; (end - start) as usize];
+        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut chunk).is_err() {
+            return len;
+        }
+        if let Some(at) = chunk.windows(MARK.len()).rposition(|w| w == MARK) {
+            // The start of that line (or of the chunk: the rest of the line still parses).
+            return chunk[..at]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(start, |nl| start + nl as u64 + 1);
+        }
+        if start == 0 {
+            return len;
+        }
+        // Overlap the chunks so a mark split between them is still found.
+        end = start + MARK.len() as u64;
+    }
+}
+
 /// `mpmissions\__cur_mp.deerisle\mission.c` -> `Some(Some("deerisle"))`; the main-menu intro
 /// mission -> `Some(None)`; anything else -> `None`.
 fn mission_world(line: &str) -> Option<Option<String>> {
@@ -240,10 +256,8 @@ fn launch_options(
         // Started without a server or mods, or not written yet.
         return (complete.lines().count() >= 10).then_some((None, None, Vec::new()));
     };
-    let option = |name: &str| -> Option<&str> {
-        let start = line.find(name)? + name.len();
-        line[start..].split(" -").next().map(str::trim)
-    };
+    let args = arguments(line);
+    let option = |name: &str| -> Option<&str> { args.iter().find_map(|a| a.strip_prefix(name)) };
     let mut server = None;
     let mut query = None;
     if let Some(connect) = option("-connect=") {
@@ -257,7 +271,7 @@ fn launch_options(
     let mods = option("-mod=")
         .map(|list| {
             list.split(';')
-                .map(|m| m.trim().trim_matches('"'))
+                .map(str::trim)
                 .filter(|m| !m.is_empty())
                 .filter_map(|m| mod_id(m, game))
                 .collect()
@@ -271,20 +285,67 @@ fn launch_options(
 /// (`workshop/content/221100/<item id>`), so follow them; otherwise use the folder name.
 fn mod_id(entry: &str, game: Option<&Path>) -> Option<String> {
     let name = entry.rsplit(['\\', '/']).next()?.to_string();
-    let absolute = Path::new(entry).is_absolute() || entry.contains(':');
-    if let Some(game) = game
-        && !absolute
+    let join = |base: PathBuf, rest: &str| {
+        rest.split(['\\', '/'])
+            .filter(|c| !c.is_empty())
+            .fold(base, |p, c| p.join(c))
+    };
+    // Under Proton, Windows paths on drive Z: are the Linux file system.
+    let proton = if cfg!(windows) {
+        None
+    } else {
+        entry
+            .strip_prefix(['Z', 'z'])
+            .and_then(|r| r.strip_prefix(":\\").or_else(|| r.strip_prefix(":/")))
+    };
+    let path = if let Some(rest) = proton {
+        Some(join(PathBuf::from("/"), rest))
+    } else if Path::new(entry).is_absolute() {
+        Some(PathBuf::from(entry))
+    } else if entry.contains(':') {
+        None // another drive under Proton
+    } else {
+        game.map(|game| join(game.to_path_buf(), entry))
+    };
+    if let Some(path) = path.filter(|p| p.exists())
+        && let Some(real) = crate::steam::real_path(&path).file_name()
     {
-        let path = entry
-            .split(['\\', '/'])
-            .fold(game.to_path_buf(), |p, c| p.join(c));
-        if path.exists()
-            && let Some(real) = crate::steam::real_path(&path).file_name()
-        {
-            return Some(real.to_string_lossy().into_owned());
-        }
+        return Some(real.to_string_lossy().into_owned());
     }
     (!name.is_empty()).then_some(name)
+}
+
+/// A command line's arguments: split at spaces outside double quotes, which are removed. An
+/// unquoted piece that doesn't start with `-` continues the argument before it, as in
+/// `-mod=!Workshop\@Deer Isle` written without quotes.
+fn arguments(line: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let (mut in_quotes, mut quoted) = (false, false);
+    for c in line.chars().chain([' ']) {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                quoted = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if current.is_empty() && !quoted {
+                    continue;
+                }
+                let piece = std::mem::take(&mut current);
+                match args.last_mut() {
+                    Some(last) if !quoted && !piece.starts_with('-') => {
+                        last.push(' ');
+                        last.push_str(&piece);
+                    }
+                    _ => args.push(piece),
+                }
+                quoted = false;
+            }
+            c => current.push(c),
+        }
+    }
+    args
 }
 
 fn newest(dirs: &[PathBuf], prefix: &str, suffix: &str) -> Option<PathBuf> {
@@ -371,6 +432,40 @@ mod tests {
             Some("1559212036")
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn mission_far_back_in_a_long_log() {
+        let path = std::env::temp_dir().join(format!("dzm-log-{}.log", std::process::id()));
+        let mission = "SCRIPT : Creating Mission: mpmissions\\__cur_mp.namalsk\\mission.c\n";
+        let filler = "SCRIPT : something else happened\n".repeat(200_000); // ~6.6 MB
+        std::fs::write(&path, format!("start\n{mission}{filler}")).unwrap();
+        let mut watcher = Watcher::default();
+        let mut world = None;
+        loop {
+            let lines = watcher.read_new_lines(&path);
+            if lines.is_empty() {
+                break;
+            }
+            for line in lines {
+                if let Some(w) = mission_world(&line) {
+                    world = w;
+                }
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(world.as_deref(), Some("namalsk"));
+    }
+
+    #[test]
+    fn launch_arguments() {
+        let line = r#"Command line: "C:\Games\DayZ\DayZ_x64.exe" "-connect=1.2.3.4:2302:27016" "-mod=!Workshop\@Deer Isle;@CF" -nolauncher"#;
+        let args = arguments(line);
+        assert!(args.contains(&"-connect=1.2.3.4:2302:27016".to_string()));
+        assert!(args.contains(&r"-mod=!Workshop\@Deer Isle;@CF".to_string()));
+        let unquoted =
+            r"DayZ_x64.exe -connect=1.2.3.4:2302 -mod=!Workshop\@Deer Isle;@CF -port=2302";
+        assert!(arguments(unquoted).contains(&r"-mod=!Workshop\@Deer Isle;@CF".to_string()));
     }
 
     #[test]

@@ -23,9 +23,9 @@ type WaterPoint<'a> = (f32, f32, &'a str);
 
 /// Lower-case class names that extend `Well` in any of these archives' scripts.
 pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
-    // Every parent each class is declared with: scripts redeclare classes (`modded class`,
-    // other mods), and any one path to `Well` counts.
-    let mut parents: HashMap<String, HashSet<String>> = HashMap::new();
+    // Each class's subclasses. Scripts redeclare classes (`modded class`, other mods), and any
+    // one path to `Well` counts.
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for pbo in scripts {
         for entry in &pbo.entries {
             if !entry.name.to_ascii_lowercase().ends_with(".c") {
@@ -38,22 +38,19 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> HashSet<String> {
             // (`LabTap extends Sink`, with `Sink extends Well` in another file).
             let text = String::from_utf8_lossy(&data);
             for (class, parent) in class_declarations(&text) {
-                parents.entry(class).or_default().insert(parent);
+                children.entry(parent).or_default().push(class);
             }
         }
     }
     let mut wells: HashSet<String> = BASE_WELLS.iter().map(|s| s.to_string()).collect();
     wells.insert("well".into());
-    // Follow `extends` chains until nothing new joins.
-    loop {
-        let before = wells.len();
-        for (class, declared) in &parents {
-            if declared.iter().any(|parent| wells.contains(parent)) {
-                wells.insert(class.clone());
+    // Everything below `Well` (and the base pumps), each class visited once.
+    let mut queue: Vec<String> = wells.iter().cloned().collect();
+    while let Some(class) = queue.pop() {
+        for child in children.get(&class).into_iter().flatten() {
+            if wells.insert(child.clone()) {
+                queue.push(child.clone());
             }
-        }
-        if wells.len() == before {
-            break;
         }
     }
     wells.remove("well");
@@ -112,7 +109,7 @@ pub fn markers(objects: &wrp::Objects, wells: &HashSet<String>) -> Vec<Marker> {
     let is_well = |class: &str| {
         wells.contains(class)
             // Config variants of a scripted class, like `..._pump_yellow_metro`.
-            || wells.iter().any(|w| class.strip_prefix(w.as_str()).is_some_and(|r| r.starts_with('_')))
+            || class.match_indices('_').any(|(at, _)| wells.contains(&class[..at]))
     };
     let mut markers: Vec<Marker> = objects
         .classed

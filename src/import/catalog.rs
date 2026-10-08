@@ -119,6 +119,15 @@ impl WorldSource {
         parts.join("|")
     }
 
+    /// Whether an installed pack was built from these files as they are now. (A mod update can
+    /// also resize the terrain without touching its tiles.)
+    pub fn is_current(&self, pack: &maps::MapPack) -> bool {
+        pack.meta.source == self.fingerprint()
+            && self
+                .world_size
+                .is_none_or(|size| (size.round() - pack.meta.world_size).abs() < 1.0)
+    }
+
     /// Whether any of its archives changed since the scan, so their entry offsets are stale.
     pub fn changed_since_scan(&self) -> bool {
         std::iter::once(&self.satellite.pbo)

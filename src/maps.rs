@@ -158,6 +158,8 @@ pub fn load(dir: &Path) -> Result<MapPack> {
 }
 
 pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
+    // Never save what `load` would refuse (it would be re-imported on every join).
+    meta.check()?;
     std::fs::create_dir_all(dir)?;
     write_atomic(
         &dir.join("map.toml"),
@@ -170,8 +172,11 @@ pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    let result = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Friendly names for the official maps; modded maps fall back to their world name.

@@ -141,6 +141,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         fade: Fade::new(own_fade()),
         game_center: None,
         exit: false,
+        restart: false,
     };
     if show {
         host.show();
@@ -152,7 +153,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
             .next_repaint
             .map(|t| t.saturating_duration_since(Instant::now()));
         // A skipped frame has no frame callback coming to wake us; try again shortly.
-        if host.needs_redraw && !host.overlay.as_ref().is_some_and(|o| o.frame_pending) {
+        if host.needs_redraw && host.overlay.as_ref().is_some_and(|o| !o.frame_pending) {
             timeout = Some(timeout.map_or(SKIPPED_RETRY, |t| t.min(SKIPPED_RETRY)));
         }
         event_loop.dispatch(timeout, &mut host)?;
@@ -165,6 +166,11 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         }
     }
     host.hide();
+    if host.restart {
+        drop(host);
+        drop(_control);
+        super::restart();
+    }
     Ok(())
 }
 
@@ -214,6 +220,8 @@ struct Host {
     /// Where the game window was last seen, to open the overlay on its monitor.
     game_center: Option<(i32, i32)>,
     exit: bool,
+    /// Start over when the loop ends (the graphics device was lost).
+    restart: bool,
 }
 
 impl Host {
@@ -365,6 +373,12 @@ impl Host {
     }
 
     fn render(&mut self) {
+        if self.gpu.is_lost() {
+            self.hide();
+            self.restart = true;
+            self.exit = true;
+            return;
+        }
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
