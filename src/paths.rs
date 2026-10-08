@@ -153,15 +153,13 @@ pub fn locate(config: &Config) -> Paths {
     // Also where the game's links lead: a library Steam doesn't list (the game folder set by
     // hand), even when a listed one has a Workshop folder too.
     if let Some(game) = &paths.game {
-        let mut all: Vec<PathBuf> = paths.workshop.iter().map(|w| w.path.clone()).collect();
-        let links = workshop_from_links(&game.path);
-        all.extend(links.iter().map(|l| l.path.clone()));
-        let kept = steam::dedup_dirs(all);
-        let listed = paths.workshop.len();
+        let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
+        let listed: std::collections::HashSet<PathBuf> =
+            paths.workshop.iter().map(|w| real(&w.path)).collect();
         paths.workshop.extend(
-            links
+            workshop_from_links(&game.path)
                 .into_iter()
-                .filter(|l| kept[listed..].contains(&l.path)),
+                .filter(|l| !listed.contains(&real(&l.path))),
         );
     }
 

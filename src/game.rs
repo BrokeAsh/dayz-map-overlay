@@ -86,6 +86,8 @@ struct Watcher {
     /// Skipping the rest of a line too long to keep.
     overlong: bool,
     relocated: Option<Instant>,
+    /// When the game being watched started.
+    started: Option<SystemTime>,
 }
 
 impl Watcher {
@@ -94,6 +96,13 @@ impl Watcher {
             *self = Self::default();
             return Session::default();
         };
+        // Restarted between two looks (or while a server query was waiting): a new session.
+        if self.started != Some(started) {
+            *self = Self {
+                started: Some(started),
+                ..Self::default()
+            };
+        }
         // Logs from before this game started belong to an earlier session (the game may be
         // running with -nologs). A little slack for file-time granularity.
         let since = started - Duration::from_secs(5);

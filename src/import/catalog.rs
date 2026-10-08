@@ -21,7 +21,7 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 3;
+pub const POI_VERSION: u32 = 4;
 
 const ECONOMY_FILES: [&str; 4] = [
     "mapgrouppos.xml",

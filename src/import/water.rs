@@ -61,28 +61,58 @@ pub fn well_classes(scripts: &[Arc<Pbo>]) -> anyhow::Result<HashSet<String>> {
     Ok(wells)
 }
 
-/// `class A extends B` and `class A : B`, lower-cased.
+/// `class A extends B` and `class A : B`, lower-cased, outside comments and strings.
 fn class_declarations(text: &str) -> Vec<(String, String)> {
+    let tokens = tokens(text);
     let mut found = Vec::new();
-    let tokens: Vec<&str> = text
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
-        .filter(|t| !t.is_empty())
-        .collect();
-    for i in 0..tokens.len().saturating_sub(2) {
-        if tokens[i] != "class" {
-            continue;
-        }
-        let class = tokens[i + 1].trim_end_matches(':');
-        let parent = match (tokens[i + 1].ends_with(':'), tokens[i + 2]) {
-            (true, parent) => Some(parent),
-            (false, "extends" | ":") => tokens.get(i + 3).copied(),
-            _ => None,
-        };
-        if let Some(parent) = parent {
-            found.push((class.to_ascii_lowercase(), parent.to_ascii_lowercase()));
+    for i in 0..tokens.len().saturating_sub(3) {
+        if tokens[i] == "class" && matches!(tokens[i + 2], "extends" | ":") {
+            let (class, parent) = (tokens[i + 1], tokens[i + 3]);
+            if class != ":" && parent != ":" {
+                found.push((class.to_ascii_lowercase(), parent.to_ascii_lowercase()));
+            }
         }
     }
     found
+}
+
+/// Enforce Script's words and `:`s, skipping comments and string literals.
+fn tokens(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            i += rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        } else if rest.starts_with(b"/*") {
+            i += rest
+                .windows(2)
+                .skip(2)
+                .position(|w| w == b"*/")
+                .map_or(rest.len(), |p| p + 4);
+        } else if rest[0] == b'"' {
+            // To the closing quote, past escaped ones.
+            let mut j = 1;
+            while j < rest.len() && rest[j] != b'"' {
+                j += if rest[j] == b'\\' { 2 } else { 1 };
+            }
+            i += (j + 1).min(rest.len());
+        } else if rest[0] == b':' {
+            tokens.push(":");
+            i += 1;
+        } else if rest[0].is_ascii_alphanumeric() || rest[0] == b'_' {
+            let len = rest
+                .iter()
+                .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                .unwrap_or(rest.len());
+            tokens.push(&text[i..i + len]);
+            i += len;
+        } else {
+            i += 1;
+        }
+    }
+    tokens
 }
 
 /// What a water model is, or `None` if it isn't fresh water (streambeds are dry, ice is
@@ -266,6 +296,18 @@ mod tests {
         assert_eq!(parents["land_a3_lab_sink"], "well");
         assert_eq!(parents["sink2"], "land_a3_lab_sink");
         assert_eq!(parents["other"], "house");
+    }
+
+    #[test]
+    fn declarations_skip_comments_and_strings() {
+        let text = "/* class LabTap extends Well {} */ class LabTap extends House {}\n\
+                    // class Tap2 extends Well\n\
+                    string s = \"class Tap3 extends Well \\\" class Tap4 extends Well\";\n\
+                    class Compact:Well {}";
+        let parents: HashMap<_, _> = class_declarations(text).into_iter().collect();
+        assert_eq!(parents["labtap"], "house");
+        assert_eq!(parents["compact"], "well");
+        assert_eq!(parents.len(), 2, "{parents:?}");
     }
 
     #[test]
