@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Windows 10 and 11 support. The map opens over DayZ in borderless or windowed mode without
   taking focus from the game, finds DayZ through Steam's registry entry and library list, reads
