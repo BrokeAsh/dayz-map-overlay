@@ -13,8 +13,13 @@ const WORKERS: usize = 4;
 enum Slot {
     Pending,
     Missing,
+    /// Couldn't be read (another program had it open, say); tried again after a while.
+    Failed(std::time::Instant),
     Loaded(TextureHandle),
 }
+
+/// How long a tile that couldn't be read waits before another try.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct Entry {
     slot: Slot,
@@ -24,6 +29,7 @@ struct Entry {
 enum Loaded {
     Image(ColorImage),
     Missing,
+    Failed,
     /// No longer on screen by the time a worker got to it.
     Skipped,
 }
@@ -114,6 +120,11 @@ impl TileCache {
                         entry.slot = Slot::Missing;
                     }
                 }
+                Loaded::Failed => {
+                    if let Some(entry) = self.entries.get_mut(&path) {
+                        entry.slot = Slot::Failed(std::time::Instant::now());
+                    }
+                }
                 Loaded::Skipped => {
                     self.entries.remove(&path);
                 }
@@ -134,9 +145,15 @@ impl TileCache {
             }
         });
         entry.last_used = frame;
+        if let Slot::Failed(at) = entry.slot
+            && at.elapsed() >= RETRY
+        {
+            entry.slot = Slot::Pending;
+            let _ = self.requests.send((self.generation, path.to_owned()));
+        }
         match &entry.slot {
             Slot::Pending => None,
-            Slot::Missing => Some(None),
+            Slot::Missing | Slot::Failed(_) => Some(None),
             Slot::Loaded(texture) => Some(Some(texture.id())),
         }
     }
@@ -203,6 +220,11 @@ fn load(path: &PathBuf) -> Loaded {
         Ok(image) => image.into_rgba8(),
         Err(image::ImageError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Loaded::Missing;
+        }
+        // A damaged tile stays missing; one that couldn't be read is tried again.
+        Err(image::ImageError::IoError(e)) => {
+            log::warn!("{}: {e}", path.display());
+            return Loaded::Failed;
         }
         Err(e) => {
             log::warn!("{}: {e}", path.display());

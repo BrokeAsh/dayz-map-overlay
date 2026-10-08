@@ -72,7 +72,7 @@ pub struct TerrainFile {
 
 impl TerrainFile {
     pub fn read(&self) -> anyhow::Result<Vec<u8>> {
-        self.pbo.read(&self.pbo.entries[self.entry])
+        self.pbo.read_large(&self.pbo.entries[self.entry])
     }
 }
 

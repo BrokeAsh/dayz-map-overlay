@@ -135,7 +135,14 @@ impl Pbo {
     /// Reads and unpacks an entry. Errors from the file system come back as `io::Error`
     /// (see [`is_io`]); anything else means the entry itself is bad.
     pub fn read(&self, entry: &PboEntry) -> Result<Vec<u8>> {
-        self.unpack(entry, usize::MAX)
+        // Packed entries in real mods are at most a few tens of MB; a crafted header could
+        // otherwise unpack gigabytes from a small archive.
+        self.unpack(entry, usize::MAX, 64 << 20)
+    }
+
+    /// Reads an entry that may legitimately be huge (a terrain's `.wrp`, hundreds of MB).
+    pub fn read_large(&self, entry: &PboEntry) -> Result<Vec<u8>> {
+        self.unpack(entry, usize::MAX, 1 << 30)
     }
 
     /// Reads at most the first `len` bytes of an entry (only those are unpacked).
@@ -143,10 +150,11 @@ impl Pbo {
         if entry.method == 0 {
             return self.read_raw(entry, len);
         }
-        self.unpack(entry, len)
+        self.unpack(entry, len, len)
     }
 
-    fn unpack(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {
+    /// Up to `len` bytes of an entry, refusing to unpack more than `max`.
+    fn unpack(&self, entry: &PboEntry, len: usize, max: usize) -> Result<Vec<u8>> {
         match entry.method {
             0 => {
                 let mut data = self.read_raw(entry, entry.size as usize)?;
@@ -154,14 +162,11 @@ impl Pbo {
                 Ok(data)
             }
             CPRS => {
-                // Packed entries in real mods are at most a few tens of MB; a crafted header
-                // could otherwise unpack gigabytes from a small archive.
-                const MAX_UNPACKED: u32 = 64 << 20;
-                if entry.original_size > MAX_UNPACKED {
+                let want = len.min(entry.original_size as usize);
+                if want > max {
                     bail!("{}: compressed entry too large", entry.name);
                 }
                 let packed = self.read_raw(entry, entry.size as usize)?;
-                let want = len.min(entry.original_size as usize);
                 let data = super::lzss::decompress(&packed, want);
                 if data.len() != want {
                     bail!("{}: corrupt compressed entry", entry.name);
