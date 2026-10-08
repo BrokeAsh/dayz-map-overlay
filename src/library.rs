@@ -206,6 +206,8 @@ impl Worker {
                 if installed {
                     if !again {
                         s.ready = Some(world.to_string());
+                        // An earlier map's problem no longer applies.
+                        s.message = None;
                     }
                 } else {
                     s.message = Some(format!(
@@ -219,7 +221,10 @@ impl Worker {
             Ok(mut pack) if source.is_current(&pack) => {
                 self.refresh_pois(&source, &mut pack);
                 if !again {
-                    self.update(|s| s.ready = Some(source.id.clone()));
+                    self.update(|s| {
+                        s.ready = Some(source.id.clone());
+                        s.message = None;
+                    });
                 }
             }
             installed => {

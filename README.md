@@ -63,7 +63,7 @@ dayz-map &               # or start it now
 path either way.
 
 To build it yourself, install Rust (1.95 or newer) and the Wayland and xkbcommon development packages
-(`libwayland-dev libxkbcommon-dev` on Debian and Ubuntu), then run `cargo build --release`.
+(`libwayland-dev libxkbcommon-dev pkg-config` on Debian and Ubuntu), then run `cargo build --release`.
 
 ## Use
 

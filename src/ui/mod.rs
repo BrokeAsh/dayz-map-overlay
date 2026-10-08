@@ -216,11 +216,15 @@ impl OverlayApp {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        if self.maps_checked.elapsed() > Duration::from_secs(2) {
+        const CHECK_EVERY: Duration = Duration::from_secs(2);
+        if self.maps_checked.elapsed() >= CHECK_EVERY {
             self.reload_if_changed();
         }
-        // Looked for again in a moment even if nothing else happens.
-        ui.ctx().request_repaint_after(Duration::from_secs(2));
+        // Looked for again then, even if nothing else happens. (A little later: egui wakes a
+        // frame early.)
+        let next = CHECK_EVERY.saturating_sub(self.maps_checked.elapsed());
+        ui.ctx()
+            .request_repaint_after(next + Duration::from_millis(50));
         let ctx = ui.ctx().clone();
         let screen = ui.max_rect();
         self.tiles.begin_frame(&ctx);
