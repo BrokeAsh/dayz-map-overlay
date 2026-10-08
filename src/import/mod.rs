@@ -503,10 +503,13 @@ pub fn save_tile(image: &RgbaImage, path: &Path) -> Result<()> {
 /// crash can't leave them empty. Several at a time: the disk commits them together.
 fn sync_tiles(folder: &Path) -> Result<()> {
     let mut files = Vec::new();
+    let mut levels = Vec::new();
     for level in std::fs::read_dir(folder)? {
-        for tile in std::fs::read_dir(level?.path())? {
+        let level = level?.path();
+        for tile in std::fs::read_dir(&level)? {
             files.push(tile?.path());
         }
+        levels.push(level);
     }
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -528,7 +531,23 @@ fn sync_tiles(folder: &Path) -> Result<()> {
             .into_iter()
             .try_for_each(|w| w.join().expect("sync thread panicked"))
     })
-    .context("syncing the new tiles")
+    .context("syncing the new tiles")?;
+    // And the folders' entries for them, deepest first, up to the map's folder (which also
+    // lists the new points-of-interest file). Windows' file system logs those itself.
+    #[cfg(unix)]
+    for dir in levels
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .chain([folder])
+        .chain(folder.parent())
+    {
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .with_context(|| format!("syncing {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = levels;
+    Ok(())
 }
 
 /// Halves an image with a 2x2 box filter.

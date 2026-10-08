@@ -299,7 +299,8 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.tmp", std::process::id()));
     let result = write_synced(Path::new(&tmp), data).and_then(|()| std::fs::rename(&tmp, path));
-    // And the rename itself (on Unix, a folder can be synced; Windows commits it already).
+    // And the rename itself (on Unix, a folder can be synced; Windows commits it already). Not
+    // an error if this fails: the new file is in place, and callers would undo work it uses.
     #[cfg(unix)]
     if result.is_ok()
         && let Some(dir) = path.parent()

@@ -267,8 +267,12 @@ impl OverlayApp {
             || (game_missing && !self.maps_window_dismissed)
     }
 
-    /// Closes the Maps window, for good if it opened by itself.
+    /// Closes the Maps window, for good if it opened by itself. (Not while no map is installed:
+    /// it stays then, and must keep asking for the game folder once one is.)
     fn close_maps_window(&mut self) {
+        if self.maps.is_empty() {
+            return;
+        }
         self.show_maps_window = false;
         self.maps_window_dismissed = crate::paths::current().game.is_none();
     }
