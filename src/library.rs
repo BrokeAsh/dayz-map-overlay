@@ -132,14 +132,14 @@ impl Worker {
                 }
                 // Maybe newly downloaded, or readable again.
                 if let Some((world, mods)) = unsettled.take()
-                    && !self.ensure(&world, &mods)
+                    && !self.ensure(&world, &mods, true)
                 {
                     *unsettled = Some((world, mods));
                 }
             }
             Request::Forget => *unsettled = None,
             Request::Ensure { world, mods } => {
-                *unsettled = (!self.ensure(&world, &mods)).then_some((world, mods));
+                *unsettled = (!self.ensure(&world, &mods, false)).then_some((world, mods));
             }
             Request::Import { id } => {
                 if let Some(source) = self.catalog().best(&id, &[]) {
@@ -191,10 +191,15 @@ impl Worker {
 
     /// Returns whether that settled it: the map is ready and up to date, or there's nothing
     /// more to try (no files, but an imported picture).
-    fn ensure(&self, world: &str, mods: &[String]) -> bool {
+    /// `retry` after a rescan: the catalog is fresh, and the user may be looking at another map,
+    /// so an old import is only shown again if it was rebuilt.
+    fn ensure(&self, world: &str, mods: &[String], retry: bool) -> bool {
         let mut catalog = self.catalog();
         // A newly downloaded mod: maybe this map, or another copy of it that the server uses.
-        if catalog.best(world, mods).is_none() || mods.iter().any(|m| !catalog.mods.contains(m)) {
+        if !retry
+            && (catalog.best(world, mods).is_none()
+                || mods.iter().any(|m| !catalog.mods.contains(m)))
+        {
             catalog = self.scan();
         }
         let Some(source) = catalog.best(world, mods).map(|s| self.fresh(s, mods)) else {
@@ -206,7 +211,9 @@ impl Worker {
             let installed = installed.is_some();
             self.update(|s| {
                 if installed {
-                    s.ready = Some(world.to_string());
+                    if !retry {
+                        s.ready = Some(world.to_string());
+                    }
                 } else {
                     s.message = Some(format!(
                         "No map files for \"{world}\" were found in the game or Workshop folders."

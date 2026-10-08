@@ -146,7 +146,8 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 `%APPDATA%\dayz-map-overlay\config\config.toml`) is written when the overlay closes:
 
 ```toml
-hotkey = "m"                                  # a character or f1–f24 (on Linux, also a keysym like 0x6d)
+hotkey = "m"                                  # a character or f1–f24 (on Linux: a Latin character such as ö,
+                                              # or a keysym like 0x6d for other scripts)
 window_match = ["steam_app_221100", "dayz_x64.exe"]  # opens only when the focused window's
                                               # class or title contains one (on Windows: the
                                               # game's program, ["dayz_x64.exe"])

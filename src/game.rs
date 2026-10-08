@@ -443,12 +443,27 @@ fn dayz_started() -> Option<SystemTime> {
             .to_string_lossy()
             .bytes()
             .all(|b| b.is_ascii_digit())
-            && std::fs::read(p.path().join("cmdline")).is_ok_and(|c| {
-                c.windows(12)
-                    .any(|w| w.eq_ignore_ascii_case(b"DayZ_x64.exe"))
-            })
+            && is_game_process(&p.path())
     })?;
     Some(process_start(&process.path()).unwrap_or(SystemTime::UNIX_EPOCH))
+}
+
+/// Whether a process is the game itself: Wine names it after the program and puts the program's
+/// path first on its command line. (Not a launcher or script that merely mentions the game.)
+#[cfg(not(windows))]
+fn is_game_process(proc_dir: &Path) -> bool {
+    const EXE: &str = "DayZ_x64.exe";
+    let comm = std::fs::read_to_string(proc_dir.join("comm")).unwrap_or_default();
+    if comm.trim_end().eq_ignore_ascii_case(EXE) {
+        return true;
+    }
+    let cmdline = std::fs::read(proc_dir.join("cmdline")).unwrap_or_default();
+    let program = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+    let name = program
+        .rsplit(|&b| b == b'\\' || b == b'/')
+        .next()
+        .unwrap_or_default();
+    name.eq_ignore_ascii_case(EXE.as_bytes())
 }
 
 /// A process's start time: `/proc/<pid>/stat` has it in clock ticks after boot, and

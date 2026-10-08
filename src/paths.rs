@@ -150,10 +150,19 @@ pub fn locate(config: &Config) -> Paths {
         how: "Steam library",
     })
     .collect();
-    if paths.workshop.is_empty()
-        && let Some(game) = &paths.game
-    {
-        paths.workshop = workshop_from_links(&game.path);
+    // Also where the game's links lead: a library Steam doesn't list (the game folder set by
+    // hand), even when a listed one has a Workshop folder too.
+    if let Some(game) = &paths.game {
+        let mut all: Vec<PathBuf> = paths.workshop.iter().map(|w| w.path.clone()).collect();
+        let links = workshop_from_links(&game.path);
+        all.extend(links.iter().map(|l| l.path.clone()));
+        let kept = steam::dedup_dirs(all);
+        let listed = paths.workshop.len();
+        paths.workshop.extend(
+            links
+                .into_iter()
+                .filter(|l| kept[listed..].contains(&l.path)),
+        );
     }
 
     paths.logs = log_dirs(config, &search, &mut paths.warnings);

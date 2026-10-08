@@ -272,8 +272,10 @@ fn modifier_mask(conn: &RustConnection, keycodes: &[u32]) -> Result<u16> {
 fn parse_keysym(name: &str) -> Result<u32> {
     let lower = name.trim().to_lowercase();
     let mut chars = lower.chars();
+    // Latin-1 keysyms are the character itself (`ö` is 0xf6). Other scripts' letters have
+    // older keysyms in X keymaps (Cyrillic `щ` is 0x6dd), so those are given as keysyms.
     if let (Some(c), None) = (chars.next(), chars.next())
-        && c.is_ascii_graphic()
+        && (c.is_ascii_graphic() || ('\u{a1}'..='\u{ff}').contains(&c))
     {
         return Ok(c as u32);
     }
@@ -291,7 +293,10 @@ fn parse_keysym(name: &str) -> Result<u32> {
         "tab" => Ok(0xff09),
         "grave" | "backtick" => Ok(0x60),
         _ => {
-            bail!("unknown hotkey {name:?}; use a single character, f1-f24, or a keysym like 0x6d")
+            bail!(
+                "unknown hotkey {name:?}; use a single Latin character, f1-f24, or a keysym \
+                 like 0x6d"
+            )
         }
     }
 }
@@ -406,5 +411,20 @@ impl Atoms {
             parts.push(String::from_utf8_lossy(&title).into_owned());
         }
         (parts.join(" ").trim().to_lowercase(), center)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hotkey_names() {
+        use super::parse_keysym;
+        assert_eq!(parse_keysym("m").unwrap(), 0x6d);
+        assert_eq!(parse_keysym("M").unwrap(), 0x6d);
+        assert_eq!(parse_keysym("Ö").unwrap(), 0xf6);
+        assert!(parse_keysym("щ").is_err());
+        assert_eq!(parse_keysym("f12").unwrap(), 0xffc9);
+        assert_eq!(parse_keysym("0x6d").unwrap(), 0x6d);
+        assert!(parse_keysym("nonsense").is_err());
     }
 }
