@@ -180,7 +180,11 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
 - **M does nothing (Linux):** run `dayz-map` in a terminal, focus DayZ, and press M. It logs
   `hotkey in "…": toggling the map` for every press; if nothing appears, the key isn't reaching
   it (for example with Proton's experimental Wayland mode, `PROTON_ENABLE_WAYLAND=1`). As a
-  workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings.
+  workaround, bind `dayz-map toggle` to a key in your desktop's shortcut settings. The overlay
+  then can't tell when you switch away from the game, so close it with the same key.
+- **Scrolling doesn't zoom (Windows):** turn on "Scroll inactive windows when I hover over
+  them" in Settings > Bluetooth & devices > Mouse (on by default). The overlay never takes focus
+  from the game, so Windows only sends it the wheel with that setting.
 - **The map doesn't follow the server:** `dayz-map status` should show a Logs folder and, while
   you're on a server, the map and server name.
 - **A map is missing:** `dayz-map list` shows every terrain found; Rescan in the Maps window

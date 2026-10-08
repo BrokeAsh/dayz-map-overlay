@@ -229,13 +229,13 @@ struct Host {
 impl Host {
     fn handle(&mut self, event: HostEvent) {
         match event {
-            HostEvent::Command(Command::Show) => self.show(),
+            HostEvent::Command(Command::Show) => self.show_by_command(),
             HostEvent::Command(Command::Hide) => self.hide(),
             HostEvent::Command(Command::Toggle) => {
                 if self.overlay.is_some() {
                     self.hide()
                 } else {
-                    self.show()
+                    self.show_by_command()
                 }
             }
             HostEvent::Command(Command::Quit) => self.exit = true,
@@ -263,6 +263,15 @@ impl Host {
                 None => {}
             },
         }
+    }
+
+    /// Opens for `dayz-map show` (a desktop shortcut, say). Where the game was at the last
+    /// hotkey press may be out of date, so the compositor picks: the monitor in use.
+    fn show_by_command(&mut self) {
+        if self.overlay.is_none() {
+            self.game_spot = None;
+        }
+        self.show();
     }
 
     fn show(&mut self) {

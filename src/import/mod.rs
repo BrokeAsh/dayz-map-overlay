@@ -102,7 +102,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     let pois = pois_json(source)?;
     let (layer, mut tiles_written) = build_layer(tiles, &layout, &dir, &generation, progress)?;
     let (pois_file, mut pois_written) = write_pois(&dir, &generation, &pois)?;
-    sync_tiles(&dir)?;
+    sync_tiles(&dir.join(layer.dir.as_deref().unwrap_or(SATELLITE)))?;
 
     let old = maps::load(&dir).ok().map(|p| p.meta);
     let meta = MapMeta {
@@ -139,20 +139,19 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
         *pack = current;
         return Ok(());
     }
+    if current.meta.pois_source == source.pois_fingerprint() {
+        // Done by another import meanwhile; saving again would only make the overlay reload.
+        *pack = current;
+        return Ok(());
+    }
     let old = current.meta.clone();
     let mut meta = current.meta;
-    let mut written = None;
-    if meta.pois_source != source.pois_fingerprint() {
-        let (file, guard) = write_pois(&pack.dir, &maps::generation(), &pois_json(source)?)?;
-        meta.pois = Some(file);
-        written = Some(guard);
-    }
+    let (file, mut written) = write_pois(&pack.dir, &maps::generation(), &pois_json(source)?)?;
+    meta.pois = Some(file);
     meta.pois_source = source.pois_fingerprint();
     maps::save_meta(&pack.dir, &meta)?;
-    if let Some(mut written) = written {
-        written.keep();
-        maps::remove_unused(&pack.dir, Some(&old), &meta);
-    }
+    written.keep();
+    maps::remove_unused(&pack.dir, Some(&old), &meta);
     pack.meta = meta;
     Ok(())
 }
@@ -482,32 +481,53 @@ pub fn save_tile(image: &RgbaImage, path: &Path) -> Result<()> {
     } else {
         image.write_with_encoder(image::codecs::png::PngEncoder::new(&mut file))?;
     }
-    // Dropping the writer would hide a failed final write (a full disk, say). (Synced to disk
-    // all at once, by `sync_tiles`.)
+    // Dropping the writer would hide a failed final write (a full disk, say).
     std::io::Write::flush(&mut file)?;
-    Ok(())
-}
-
-/// Waits until the tiles just written are on disk, so once map.toml points to them a crash
-/// can't leave them empty. One sync of the whole file system: thousands of single-file ones
-/// take seconds. (On Windows, NTFS writes them out within moments anyway, and flushing each
-/// file there is slow too.)
-fn sync_tiles(dir: &Path) -> Result<()> {
+    // Start writing it to disk now, without waiting, so `sync_tiles` finds little left to do.
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
         unsafe extern "C" {
-            fn syncfs(fd: std::ffi::c_int) -> std::ffi::c_int;
+            fn sync_file_range(fd: std::ffi::c_int, offset: i64, len: i64, flags: u32) -> i32;
         }
-        let folder = std::fs::File::open(dir)?;
-        // SAFETY: a plain system call on a descriptor we own for the call's duration.
-        if unsafe { syncfs(folder.as_raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("syncing the new tiles");
+        const SYNC_FILE_RANGE_WRITE: u32 = 2;
+        // SAFETY: a plain system call on a descriptor we own for the call's duration; only a
+        // hint, so its result doesn't matter.
+        unsafe { sync_file_range(file.get_ref().as_raw_fd(), 0, 0, SYNC_FILE_RANGE_WRITE) };
+    }
+    Ok(())
+}
+
+/// Waits until the tiles just written to `folder` are on disk, so once map.toml points to them a
+/// crash can't leave them empty. Several at a time: the disk commits them together.
+fn sync_tiles(folder: &Path) -> Result<()> {
+    let mut files = Vec::new();
+    for level in std::fs::read_dir(folder)? {
+        for tile in std::fs::read_dir(level?.path())? {
+            files.push(tile?.path());
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = dir;
-    Ok(())
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| -> std::io::Result<()> {
+                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        // (Windows only flushes a file opened for writing.)
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(path)?
+                            .sync_all()?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .try_for_each(|w| w.join().expect("sync thread panicked"))
+    })
+    .context("syncing the new tiles")
 }
 
 /// Halves an image with a 2x2 box filter.
@@ -587,7 +607,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         }
         current = downsample(&current);
     }
-    sync_tiles(&dir)?;
+    sync_tiles(&work_dir)?;
     let old = maps::load(&dir).ok().map(|p| p.meta);
     let mut meta = old.clone().unwrap_or_else(|| MapMeta {
         id: id.into(),

@@ -454,6 +454,10 @@ fn import_one(world: &import::catalog::WorldSource) -> Result<()> {
     if let Ok(mut pack) = maps::load(&maps::maps_dir().join(&world.id))
         && world.is_current(&pack)
     {
+        if pack.meta.pois_source == world.pois_fingerprint() {
+            println!("{} is up to date", world.name);
+            return Ok(());
+        }
         import::refresh_pois(world, &mut pack)?;
         println!(
             "{} is up to date; rebuilt its points of interest in {:.0?}",
