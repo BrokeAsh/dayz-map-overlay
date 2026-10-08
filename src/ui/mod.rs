@@ -90,6 +90,8 @@ pub struct OverlayApp {
     maps_checked: Instant,
     session: Session,
     show_maps_window: bool,
+    /// Closed by the user while the game folder wasn't found (it opens by itself then).
+    maps_window_dismissed: bool,
     close_requested: bool,
     /// The folder the user is picking for the game, delivered by the dialog's thread.
     picked_game_dir: Option<crossbeam_channel::Receiver<Option<PathBuf>>>,
@@ -116,6 +118,7 @@ impl OverlayApp {
             maps_checked: Instant::now(),
             session: Session::default(),
             show_maps_window: false,
+            maps_window_dismissed: false,
             close_requested: false,
             picked_game_dir: None,
             notice: None,
@@ -239,8 +242,12 @@ impl OverlayApp {
             self.map_view(ui, index, screen);
         }
         self.toolbar(&ctx);
+        // Without the game folder it asks for it, until closed while a map is installed.
         let game_missing = crate::paths::current().game.is_none();
-        if self.show_maps_window || self.maps.is_empty() || game_missing {
+        if self.show_maps_window
+            || self.maps.is_empty()
+            || (game_missing && !self.maps_window_dismissed)
+        {
             self.maps_window(&ctx);
         }
         self.tiles.end_frame();
@@ -798,6 +805,7 @@ impl OverlayApp {
         });
         if !open {
             self.show_maps_window = false;
+            self.maps_window_dismissed = true;
         }
         if let Some(id) = view {
             self.select(&id);

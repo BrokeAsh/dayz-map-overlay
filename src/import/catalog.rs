@@ -177,15 +177,16 @@ impl Catalog {
     /// The source to use for a world: one from a mod the server loads, then the base game, then
     /// the most complete.
     pub fn best(&self, id: &str, server_mods: &[String]) -> Option<WorldSource> {
-        let mut best = self
-            .candidates(id)
-            .max_by_key(|w| {
-                let on_server = w.mod_id.as_ref().is_some_and(|m| server_mods.contains(m));
-                (on_server, w.mod_id.is_none(), w.satellite.tiles.len())
-            })?
-            .clone();
-        // A retexture mod may ship only tiles; borrow the rest from another copy of the map.
-        for other in self.candidates(id) {
+        let rank = |w: &WorldSource| {
+            let on_server = w.mod_id.as_ref().is_some_and(|m| server_mods.contains(m));
+            (on_server, w.mod_id.is_none(), w.satellite.tiles.len())
+        };
+        let mut ranked: Vec<&WorldSource> = self.candidates(id).collect();
+        ranked.sort_by_key(|w| std::cmp::Reverse(rank(w)));
+        let mut best = (*ranked.first()?).clone();
+        // A retexture mod may ship only tiles; borrow the rest from another copy of the map, in
+        // the same order (one the server loads before one it doesn't).
+        for other in ranked {
             if best.world_size.is_none() {
                 best.world_size = other.world_size;
             }
