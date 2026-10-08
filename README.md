@@ -7,8 +7,9 @@ towns, water pumps, fuel, loot buildings by type, heli crash sites, vehicle spaw
 
 It's written in Rust and runs on Windows 10 and 11, and on Linux desktops that support
 layer-shell overlays (KDE Plasma 6, Sway, Hyprland) with DayZ running through Steam/Proton. It
-never touches the game process: it reads the game's files and logs, draws its own window above
-the game, and listens for the hotkey like any other desktop app, so BattlEye has nothing to see.
+doesn't read or change the game's memory: it reads the game's files and logs, draws its own
+window above the game, and listens for the hotkey like any other desktop app (see
+[Anti-cheat](#anti-cheat)).
 
 ## Requirements
 
@@ -193,6 +194,27 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
   you're on a server, the map and server name.
 - **A map is missing:** `dayz-map list` shows every terrain found; Rescan in the Maps window
   picks up newly downloaded mods.
+
+## Anti-cheat
+
+DayZ uses BattlEye. The overlay doesn't read or write the game's memory, load anything into
+it, hook its graphics, or send it input. What it does:
+
+- Reads the game's files (once per map) and its `script_*.log` (to tell which server you're on).
+- Draws its own see-through window on top of the game, as Discord, Steam, and OBS overlays do.
+- Hears the hotkey without blocking it, as push-to-talk does.
+- On Windows, checks that DayZ is running and in front by asking Windows for the program's path
+  and start time (the most limited access Windows has, which can't read memory). Discord's game
+  detection and Task Manager do the same.
+
+Under Proton, BattlEye runs inside Wine and can't see Linux programs at all. On Windows it can
+see every window, and external cheats also draw see-through windows over the game, so there's
+no guarantee: BattlEye doesn't publish its rules or approve tools. No ban for this kind of tool
+is known, but use it at your own risk.
+
+The map shows only what's in the game files, the same as online maps like iZurvive: terrain,
+towns, water, and loot-spawn types. It doesn't show your position, other players, or live
+loot. Some community servers ban third-party tools in their rules, so check yours.
 
 ## How it works
 
