@@ -373,15 +373,16 @@ impl Host {
     }
 
     fn render(&mut self) {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        // (Checked while shown, so the restarted overlay opens again only if this one was.)
         if self.gpu.is_lost() {
             self.hide();
             self.restart = true;
             self.exit = true;
             return;
         }
-        let Some(overlay) = self.overlay.as_mut() else {
-            return;
-        };
         if !overlay.configured || overlay.frame_pending {
             return;
         }

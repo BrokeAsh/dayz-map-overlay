@@ -346,6 +346,10 @@ impl Host {
     }
 
     fn render(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() || !self.visible {
+            return;
+        }
+        // (Checked while shown, so the restarted overlay opens again only if this one was.)
         if self.gpu.is_lost() {
             self.hide();
             self.restart = true;
@@ -355,9 +359,6 @@ impl Host {
         let Some(overlay) = self.window.as_mut() else {
             return;
         };
-        if !self.visible {
-            return;
-        }
         let window = overlay.window.clone();
         let raw = overlay.input.take_egui_input(&window);
         let app = &mut self.app;

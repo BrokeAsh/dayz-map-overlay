@@ -92,9 +92,10 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
 
     let dir = maps::maps_dir().join(&source.id);
     let _lock = ImportLock::take(&dir)?;
-    let layer = build_layer(tiles, &layout, &dir, progress)?;
-
+    // Points of interest first: they don't depend on the tiles, and the tiles replace the old
+    // ones as soon as they're built.
     write_pois(source, &dir)?;
+    let layer = build_layer(tiles, &layout, &dir, progress)?;
 
     let meta = MapMeta {
         id: source.id.clone(),
@@ -105,15 +106,13 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
         mod_id: source.mod_id.clone(),
         pois_source: source.pois_fingerprint(),
         // A picture the user imported stays in front: they chose it over the satellite.
-        layers: maps::load(&dir)
-            .map(|old| old.meta.layers)
-            .unwrap_or_default()
+        layers: maps::recorded_layers(&dir)
             .into_iter()
             .filter(|l| l.id == PICTURE)
             .chain([layer])
             .collect(),
     };
-    maps::save_meta(&dir, &meta)?;
+    save_meta_or_forget(&dir, &meta)?;
     Ok(MapPack { meta, dir })
 }
 
@@ -223,6 +222,14 @@ fn build_layer(
     let src_px = paa::decode(&source.pbo.read(&source.pbo.entries[*sample])?)?.width();
     let overlap_px = (layout.overlap_frac * f64::from(src_px)).round() as u32;
     let tile_px = src_px - 2 * overlap_px;
+    // Every tile is scaled to the largest one's size, so a mod pairing one huge tile with a big
+    // grid of tiny ones would take hours and gigabytes. Real maps are about 16,000 px across.
+    if u64::from(tile_px) * u64::from(source.grid) > 40_960 {
+        bail!(
+            "the satellite image would be {} px across, too large to be a real map",
+            u64::from(tile_px) * u64::from(source.grid)
+        );
+    }
     let max_level = source.grid.next_power_of_two().trailing_zeros();
     let meta = LayerMeta {
         id: SATELLITE.into(),
@@ -299,6 +306,22 @@ fn build_layer(
     std::fs::rename(&work_dir, &final_dir)?;
     work.0 = None;
     Ok(meta)
+}
+
+/// Saves the metadata for tiles just swapped in. If that fails, the old metadata no longer
+/// describes the tiles, so it's set aside (`maps::recorded_layers` still reads it) and the map
+/// counts as not installed until the next import.
+fn save_meta_or_forget(dir: &Path, meta: &MapMeta) -> Result<()> {
+    let result = maps::save_meta(dir, meta);
+    match &result {
+        Ok(()) => {
+            let _ = std::fs::remove_file(dir.join("map.toml.stale"));
+        }
+        Err(_) => {
+            let _ = std::fs::rename(dir.join("map.toml"), dir.join("map.toml.stale"));
+        }
+    }
+    result
 }
 
 /// A folder to delete when dropped, unless taken out first.
@@ -516,6 +539,6 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
     // The overlay draws the first layer: the picture replaces the satellite view.
     meta.layers.retain(|l| l.id != layer.id);
     meta.layers.insert(0, layer);
-    maps::save_meta(&dir, &meta)?;
+    save_meta_or_forget(&dir, &meta)?;
     Ok(MapPack { meta, dir })
 }

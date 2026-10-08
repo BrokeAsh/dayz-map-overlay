@@ -147,9 +147,13 @@ fn without_lone_tiles(objects: &wrp::Objects) -> Vec<(u32, f32, f32)> {
             (z / NEIGHBOUR_M).floor() as i32,
         )
     };
+    // Positions to the half metre, each once: tiles stacked on one spot (a crafted terrain could
+    // stack thousands) would otherwise make every lookup scan all of them.
+    let spot = |x: f32, z: f32| ((x * 2.0).round() as i32, (z * 2.0).round() as i32);
     let mut tiles: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+    let mut seen = HashSet::new();
     for &(model, x, z) in &objects.placed {
-        if is_tile(model) {
+        if is_tile(model) && seen.insert(spot(x, z)) {
             tiles.entry(cell(x, z)).or_default().push((x, z));
         }
     }
@@ -166,11 +170,17 @@ fn without_lone_tiles(objects: &wrp::Objects) -> Vec<(u32, f32, f32)> {
             })
         })
     };
+    let mut answers: HashMap<(i32, i32), bool> = HashMap::new();
     objects
         .placed
         .iter()
         .copied()
-        .filter(|&(model, x, z)| !is_tile(model) || has_neighbour(x, z))
+        .filter(|&(model, x, z)| {
+            !is_tile(model)
+                || *answers
+                    .entry(spot(x, z))
+                    .or_insert_with(|| has_neighbour(x, z))
+        })
         .collect()
 }
 
@@ -217,13 +227,24 @@ fn cluster(points: &[WaterPoint]) -> Vec<Marker> {
         })
         .collect();
     groups.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.x.total_cmp(&b.1.x)));
-    let mut kept: Vec<Marker> = Vec::new();
+    // Kept markers by `spacing`-sized cell, so checking for a crowded neighbour looks at the
+    // nine cells around instead of every marker kept so far.
     let spacing = CLUSTER_M * 0.6;
+    let bucket = |x: f32, z: f32| ((x / spacing).floor() as i32, (z / spacing).floor() as i32);
+    let mut kept: Vec<Marker> = Vec::new();
+    let mut near: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (_, marker) in groups {
-        let crowded = kept
-            .iter()
-            .any(|k| (k.x - marker.x).hypot(k.z - marker.z) < spacing);
+        let (bx, bz) = bucket(marker.x, marker.z);
+        let crowded = (bx - 1..=bx + 1).any(|i| {
+            (bz - 1..=bz + 1).any(|j| {
+                near.get(&(i, j)).is_some_and(|list| {
+                    list.iter()
+                        .any(|&k| (kept[k].x - marker.x).hypot(kept[k].z - marker.z) < spacing)
+                })
+            })
+        });
         if !crowded {
+            near.entry((bx, bz)).or_default().push(kept.len());
             kept.push(marker);
         }
     }

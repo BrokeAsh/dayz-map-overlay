@@ -28,6 +28,9 @@ fn restart() {
         Ok(exe) => {
             let mut command = std::process::Command::new(exe);
             command.args(["run", "--restarted", "--show"]);
+            // Without a console of our own, Windows would open one for the child.
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
             if let Err(e) = command.spawn() {
                 log::error!("restarting the overlay: {e}");
             }

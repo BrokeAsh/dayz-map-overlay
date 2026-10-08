@@ -109,7 +109,8 @@ impl MapMeta {
         }
         check_world_size(self.world_size)?;
         for layer in &self.layers {
-            let ok = (1..=8192).contains(&layer.tile_px)
+            let ok = valid_id(&layer.id)
+                && (1..=8192).contains(&layer.tile_px)
                 && (1..=4096).contains(&layer.grid)
                 && layer.max_level <= 16
                 && layer.grid <= 1 << layer.max_level
@@ -155,6 +156,19 @@ pub fn load(dir: &Path) -> Result<MapPack> {
         meta,
         dir: dir.to_owned(),
     })
+}
+
+/// The layers a map's metadata lists, including metadata set aside after a failed save, so a
+/// picture the user imported isn't forgotten.
+pub fn recorded_layers(dir: &Path) -> Vec<LayerMeta> {
+    ["map.toml", "map.toml.stale"]
+        .iter()
+        .find_map(|name| {
+            let text = std::fs::read_to_string(dir.join(name)).ok()?;
+            toml::from_str::<MapMeta>(&text).ok()
+        })
+        .map(|meta| meta.layers)
+        .unwrap_or_default()
 }
 
 pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {

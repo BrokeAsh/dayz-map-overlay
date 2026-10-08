@@ -140,8 +140,10 @@ impl OverlayApp {
 
     /// Called when the game's state changes, whether or not the overlay is open.
     pub fn on_session(&mut self, session: Session) {
+        // The mods can arrive after the map (the RPT is written later), and they decide which
+        // copy of a map the server uses.
         if let Some(world) = &session.world
-            && session.world != self.session.world
+            && (session.world != self.session.world || session.mods != self.session.mods)
         {
             self.library.ensure(world, &session.mods);
         }
@@ -937,7 +939,8 @@ fn paint_grid(painter: &egui::Painter, view: &View, screen: Rect, world: f64) {
         if (visible.left()..=visible.right()).contains(&x) {
             painter.vline(x, visible.y_range(), stroke);
         }
-        let y = view.to_screen(screen, 0.0, m).y;
+        // Rows run from the north edge, like the square numbers (the last row may be short).
+        let y = view.to_screen(screen, 0.0, world - m).y;
         if (visible.top()..=visible.bottom()).contains(&y) {
             painter.hline(visible.x_range(), y, stroke);
         }

@@ -43,17 +43,25 @@ impl Gpu {
                 },
                 ..Default::default()
             }))?;
-        // wgpu panics on errors nobody captured, such as running out of graphics memory while
-        // the game fills it; log them instead.
-        device.on_uncaptured_error(std::sync::Arc::new(|error| {
-            log::error!("graphics error: {error}");
-        }));
         let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = lost.clone();
         device.set_device_lost_callback(move |reason, message| {
             log::error!("the graphics device was lost ({reason:?}): {message}");
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         });
+        // wgpu panics on errors nobody captured; log them instead (the first few: one broken
+        // resource fails every frame). Running out of graphics memory while the game fills it
+        // leaves resources unusable, so start over as if the device were lost.
+        let errors = std::sync::atomic::AtomicU32::new(0);
+        let flag = lost.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |error| {
+            if errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10 {
+                log::error!("graphics error: {error}");
+            }
+            if matches!(error, wgpu::Error::OutOfMemory { .. }) {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
         Ok(Self {
             instance,
             adapter,

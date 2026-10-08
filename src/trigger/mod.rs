@@ -193,16 +193,29 @@ impl Keycodes {
         })
     }
 
-    /// Keycodes whose unshifted or shifted symbol is `keysym` (letters match either case), in
-    /// the first two layouts: with `ru,us`, the Latin letters are in the second.
+    /// Keycodes whose unshifted or shifted symbol is `keysym` (letters match either case) in
+    /// the first layout, or else the second: with `ru,us`, the Latin letters are in the second.
     fn find(&self, keysym: u32) -> Vec<u32> {
         let lower = char::from_u32(keysym).map_or(keysym, |c| c.to_ascii_lowercase() as u32);
-        self.keysyms
-            .chunks(self.per_keycode.max(1))
-            .enumerate()
-            .filter(|(_, syms)| syms.iter().take(4).any(|&s| s == keysym || s == lower))
-            .map(|(i, _)| u32::from(self.min) + i as u32)
-            .collect()
+        let in_layout = |layout: usize| -> Vec<u32> {
+            self.keysyms
+                .chunks(self.per_keycode.max(1))
+                .enumerate()
+                .filter(|(_, syms)| {
+                    syms.iter()
+                        .skip(layout * 2)
+                        .take(2)
+                        .any(|&s| s == keysym || s == lower)
+                })
+                .map(|(i, _)| u32::from(self.min) + i as u32)
+                .collect()
+        };
+        let first = in_layout(0);
+        if first.is_empty() {
+            in_layout(1)
+        } else {
+            first
+        }
     }
 }
 

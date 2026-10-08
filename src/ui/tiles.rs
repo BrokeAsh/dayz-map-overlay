@@ -38,14 +38,17 @@ struct Wanted {
 pub struct TileCache {
     entries: HashMap<PathBuf, Entry>,
     frame: u64,
-    requests: Sender<PathBuf>,
-    results: Receiver<(PathBuf, Loaded)>,
+    requests: Sender<(u64, PathBuf)>,
+    results: Receiver<(u64, PathBuf, Loaded)>,
     wanted: Arc<Mutex<Wanted>>,
+    /// Bumped by `clear`, so loads requested before it (for a map since rebuilt) are dropped
+    /// instead of overwriting newer ones.
+    generation: u64,
 }
 
 impl TileCache {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (requests, request_rx) = crossbeam_channel::unbounded::<PathBuf>();
+        let (requests, request_rx) = crossbeam_channel::unbounded::<(u64, PathBuf)>();
         let (result_tx, results) = crossbeam_channel::unbounded();
         let wanted = Arc::new(Mutex::new(Wanted::default()));
         for i in 0..WORKERS {
@@ -58,7 +61,7 @@ impl TileCache {
             std::thread::Builder::new()
                 .name(format!("tiles-{i}"))
                 .spawn(move || {
-                    for path in rx {
+                    for (generation, path) in rx {
                         let still_wanted = {
                             let w = wanted.lock().unwrap();
                             w.current.contains(&path) || w.previous.contains(&path)
@@ -68,7 +71,7 @@ impl TileCache {
                         } else {
                             Loaded::Skipped
                         };
-                        if tx.send((path, loaded)).is_err() {
+                        if tx.send((generation, path, loaded)).is_err() {
                             break;
                         }
                         ctx.request_repaint();
@@ -82,6 +85,7 @@ impl TileCache {
             requests,
             results,
             wanted,
+            generation: 0,
         }
     }
 
@@ -93,7 +97,10 @@ impl TileCache {
             std::mem::swap(&mut w.previous, &mut w.current);
             w.current.clear();
         }
-        for (path, loaded) in self.results.try_iter() {
+        for (generation, path, loaded) in self.results.try_iter() {
+            if generation != self.generation {
+                continue;
+            }
             match loaded {
                 Loaded::Image(image) => {
                     let name = path.to_string_lossy();
@@ -120,7 +127,7 @@ impl TileCache {
         let frame = self.frame;
         self.wanted.lock().unwrap().current.insert(path.to_owned());
         let entry = self.entries.entry(path.to_owned()).or_insert_with(|| {
-            let _ = self.requests.send(path.to_owned());
+            let _ = self.requests.send((self.generation, path.to_owned()));
             Entry {
                 slot: Slot::Pending,
                 last_used: frame,
@@ -169,6 +176,7 @@ impl TileCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.generation += 1;
     }
 
     /// Drops every tile sharper than `max_level`, keeping the cheap overview levels warm.
