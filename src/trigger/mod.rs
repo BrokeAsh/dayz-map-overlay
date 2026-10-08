@@ -50,8 +50,7 @@ pub fn spawn(
         .iter()
         .map(|p| p.to_lowercase())
         .collect();
-    let matches =
-        move |window: &str| patterns.is_empty() || patterns.iter().any(|p| window.contains(p));
+    let matches = move |window: &str| window_matches(&patterns, window);
     // The first try here, so a problem shows in the log before anything else happens.
     let mut next = Listener::connect(keysym, &name);
     std::thread::Builder::new()
@@ -224,6 +223,21 @@ impl Listener {
     }
 }
 
+/// Whether a window ("<instance> <class> | <title>", lower-case) is the game. A pattern naming
+/// a program (`dayz_x64.exe`, the window class under Wine) matches only that class, not a title
+/// that mentions it (a browser page about a crash, say); others match the class or the title.
+fn window_matches(patterns: &[String], window: &str) -> bool {
+    let classes = window.split_once(" | ").map_or(window, |(c, _)| c);
+    patterns.is_empty()
+        || patterns.iter().any(|p| {
+            if p.ends_with(".exe") {
+                classes.split(' ').any(|c| c == p)
+            } else {
+                window.contains(p.as_str())
+            }
+        })
+}
+
 /// The keycodes that type `keysym` in the current layout, and the modifier bits that stop the
 /// hotkey.
 fn keys(conn: &RustConnection, keysym: u32, name: &str) -> Result<(Vec<u32>, u16)> {
@@ -362,7 +376,8 @@ impl Atoms {
         })
     }
 
-    /// Lower-cased "class instance title" of the focused X11 window (or empty), and its centre.
+    /// Lower-case "<instance> <class> | <title>" of the focused X11 window (or empty), and its
+    /// centre.
     fn active_window(&self, conn: &RustConnection, root: Window) -> (String, Option<(i32, i32)>) {
         let property = |window: Window, name: u32, kind: u32| -> Option<Vec<u8>> {
             let reply = conn
@@ -396,26 +411,43 @@ impl Atoms {
                     i32::from(origin.dst_y) + i32::from(geometry.height) / 2,
                 ))
             });
-        let mut parts = Vec::new();
+        let mut classes = Vec::new();
         if let Some(class) = property(window, AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into()) {
-            parts.extend(
+            classes.extend(
                 class
                     .split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
                     .map(|s| String::from_utf8_lossy(s).into_owned()),
             );
         }
         let title = property(window, self.net_wm_name, self.utf8_string)
             .filter(|t| !t.is_empty())
-            .or_else(|| property(window, AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()));
-        if let Some(title) = title {
-            parts.push(String::from_utf8_lossy(&title).into_owned());
-        }
-        (parts.join(" ").trim().to_lowercase(), center)
+            .or_else(|| property(window, AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()))
+            .map(|t| String::from_utf8_lossy(&t).into_owned())
+            .unwrap_or_default();
+        // "<instance> <class> | <title>": classes never contain " | ", so `matches` can tell
+        // them from the title.
+        (
+            format!("{} | {title}", classes.join(" ")).to_lowercase(),
+            center,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn game_windows() {
+        let patterns = ["steam_app_221100".to_string(), "dayz_x64.exe".to_string()];
+        let matches = |w: &str| super::window_matches(&patterns, w);
+        assert!(matches("steam_app_221100 steam_app_221100 | dayz"));
+        assert!(matches("dayz_x64.exe dayz_x64.exe | dayz"));
+        assert!(!matches(
+            "firefox firefox | dayz_x64.exe crashed - mozilla firefox"
+        ));
+        assert!(!matches("firefox firefox | dayz wiki"));
+    }
+
     #[test]
     fn hotkey_names() {
         use super::parse_keysym;

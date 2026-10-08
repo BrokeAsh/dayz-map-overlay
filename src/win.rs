@@ -139,6 +139,8 @@ pub struct Foreground {
     pub hwnd: HWND,
     /// Lower-case "<exe name> <title>", for matching against `window_match`.
     pub description: String,
+    /// Its program's file name, lower-case (`dayz_x64.exe`).
+    pub exe: String,
     /// Whether it belongs to this program.
     pub ours: bool,
 }
@@ -198,6 +200,7 @@ pub fn foreground() -> Option<Foreground> {
         Some(Foreground {
             hwnd,
             description: format!("{exe} {title}").trim().to_lowercase(),
+            exe: exe.to_lowercase(),
             ours: pid == GetCurrentProcessId(),
         })
     }

@@ -149,8 +149,9 @@ fall back to the wells listed in the economy files. Points of interest are rebui
 hotkey = "m"                                  # a character or f1–f24 (on Linux: a Latin character such as ö,
                                               # or a keysym like 0x6d for other scripts)
 window_match = ["steam_app_221100", "dayz_x64.exe"]  # opens only when the focused window's
-                                              # class or title contains one (on Windows: the
-                                              # game's program, ["dayz_x64.exe"])
+                                              # class or title contains one; one ending in .exe
+                                              # must be the program itself (Windows default:
+                                              # ["dayz_x64.exe"])
 # game_dir = "/path/to/steamapps/common/DayZ" # only if DayZ isn't found automatically
 # log_dir = "/path/to/DayZ/logs"              # only if `dayz-map status` can't find the logs
 

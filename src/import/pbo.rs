@@ -135,28 +135,41 @@ impl Pbo {
     /// Reads and unpacks an entry. Errors from the file system come back as `io::Error`
     /// (see [`is_io`]); anything else means the entry itself is bad.
     pub fn read(&self, entry: &PboEntry) -> Result<Vec<u8>> {
-        let data = self.read_raw(entry, entry.size as usize)?;
+        self.unpack(entry, usize::MAX)
+    }
+
+    /// Reads at most the first `len` bytes of an entry (only those are unpacked).
+    pub fn read_prefix(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {
+        if entry.method == 0 {
+            return self.read_raw(entry, len);
+        }
+        self.unpack(entry, len)
+    }
+
+    fn unpack(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {
         match entry.method {
-            0 => Ok(data),
+            0 => {
+                let mut data = self.read_raw(entry, entry.size as usize)?;
+                data.truncate(len);
+                Ok(data)
+            }
             CPRS => {
-                let data = super::lzss::decompress(&data, entry.original_size as usize);
-                if data.len() != entry.original_size as usize {
+                // Packed entries in real mods are at most a few tens of MB; a crafted header
+                // could otherwise unpack gigabytes from a small archive.
+                const MAX_UNPACKED: u32 = 64 << 20;
+                if entry.original_size > MAX_UNPACKED {
+                    bail!("{}: compressed entry too large", entry.name);
+                }
+                let packed = self.read_raw(entry, entry.size as usize)?;
+                let want = len.min(entry.original_size as usize);
+                let data = super::lzss::decompress(&packed, want);
+                if data.len() != want {
                     bail!("{}: corrupt compressed entry", entry.name);
                 }
                 Ok(data)
             }
             other => bail!("{}: unknown packing method 0x{other:08x}", entry.name),
         }
-    }
-
-    /// Reads at most the first `len` bytes of an entry.
-    pub fn read_prefix(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {
-        if entry.method != 0 {
-            let mut data = self.read(entry)?;
-            data.truncate(len);
-            return Ok(data);
-        }
-        self.read_raw(entry, len)
     }
 
     fn read_raw(&self, entry: &PboEntry, len: usize) -> Result<Vec<u8>> {

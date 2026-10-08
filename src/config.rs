@@ -8,7 +8,8 @@ pub struct Config {
     /// Key that opens the overlay while the game has focus (an X11 keysym name such as `m`).
     pub hotkey: String,
     /// The overlay only opens when the focused window's class or title contains one of these
-    /// (case-insensitive). Empty means any window.
+    /// (case-insensitive); one ending in `.exe` must be the program itself (on Linux, its window
+    /// class). Empty means any window.
     pub window_match: Vec<String>,
     /// DayZ install folder; found through Steam when unset.
     pub game_dir: Option<PathBuf>,

@@ -213,8 +213,17 @@ impl Host {
         Ok(())
     }
 
-    fn matches_game(&self, description: &str) -> bool {
-        self.patterns.is_empty() || self.patterns.iter().any(|p| description.contains(p))
+    /// A pattern naming a program (`dayz_x64.exe`) matches only that program, not a window
+    /// title that mentions it (a browser page about a crash, say); others match either.
+    fn matches_game(&self, front: &win::Foreground) -> bool {
+        self.patterns.is_empty()
+            || self.patterns.iter().any(|p| {
+                if p.ends_with(".exe") {
+                    front.exe == *p
+                } else {
+                    front.description.contains(p)
+                }
+            })
     }
 
     fn show(&mut self, follow_focus: bool) {
@@ -283,7 +292,7 @@ impl Host {
     /// the map closes again when the user switches away from it, as with the hotkey.
     fn show_by_command(&mut self) {
         let game = win::foreground()
-            .filter(|front| !front.ours && self.matches_game(&front.description))
+            .filter(|front| !front.ours && self.matches_game(front))
             .map(|front| front.hwnd);
         if game.is_some() {
             self.game = game;
@@ -328,7 +337,7 @@ impl Host {
             self.hide();
             return;
         }
-        let matches = self.matches_game(&front.description);
+        let matches = self.matches_game(&front);
         log::info!(
             "hotkey in {:?}: {}",
             front.description,
@@ -495,7 +504,7 @@ impl ApplicationHandler<HostEvent> for Host {
             if self.game != Some(win::foreground_window())
                 && let Some(front) = win::foreground()
                 && !front.ours
-                && !self.matches_game(&front.description)
+                && !self.matches_game(&front)
             {
                 self.hide();
             }
