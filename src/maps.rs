@@ -208,9 +208,7 @@ pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
     )
 }
 
-/// Writes a file through a temporary one (named for this process, so two programs saving at
-/// once don't share it), so readers see the old or the new file, never part of one.
-/// A name suffix for one import's folders and files, newer ones sorting later.
+/// A name suffix for one import's folders and files.
 pub fn generation() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -218,25 +216,57 @@ pub fn generation() -> String {
     format!("{:x}", now.as_micros())
 }
 
-/// Deletes the folders and files of earlier imports that `meta` (just saved) no longer uses.
-/// Best effort: what can't be deleted now (a tile being read) goes after the next import.
-pub fn remove_unused(dir: &Path, meta: &MapMeta) {
-    let used: Vec<&str> = meta
-        .layers
+/// The folders and file a map's metadata points to.
+fn used(meta: &MapMeta) -> impl Iterator<Item = &str> {
+    meta.layers
         .iter()
         .map(|l| l.dir.as_deref().unwrap_or(&l.id))
         .chain([meta.pois.as_deref().unwrap_or("pois.json")])
-        .collect();
+}
+
+/// Whether a name is one an import generates (`satellite-65d4add37c560`, `pois-….json`), or
+/// a leftover of an older version's import.
+fn generated(name: &str) -> bool {
+    let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    name.strip_prefix("satellite-").is_some_and(hex)
+        || name
+            .strip_prefix("pois-")
+            .and_then(|n| n.strip_suffix(".json"))
+            .is_some_and(hex)
+        || matches!(name, "satellite.importing" | "map.toml.stale")
+}
+
+/// After `new` was saved over `old`, deletes what `old` used and `new` doesn't, and leftovers of
+/// failed imports. Pictures go only when a new picture replaced them: one can't be rebuilt
+/// from the game's files, and nothing else here is touched. Best effort: what can't be deleted
+/// now (a tile being read) goes after a later import.
+pub fn remove_unused(dir: &Path, old: Option<&MapMeta>, new: &MapMeta) {
+    let keep: Vec<&str> = used(new).collect();
+    let new_picture = new.layers.iter().any(|l| l.id == "picture");
+    let old_used: Vec<&str> = old.map(|old| used(old).collect()).unwrap_or_default();
+    let old_pictures: Vec<&str> = old
+        .map(|old| {
+            old.layers
+                .iter()
+                .filter(|l| l.id == "picture")
+                .map(|l| l.dir.as_deref().unwrap_or(&l.id))
+                .collect()
+        })
+        .unwrap_or_default();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let ours = ["satellite", "picture", "pois"]
-            .iter()
-            .any(|p| name.starts_with(p))
-            || name == "map.toml.stale";
-        if !ours || used.contains(&name.as_str()) {
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        let remove = if old_pictures.contains(&name.as_str()) {
+            new_picture
+        } else {
+            old_used.contains(&name.as_str()) || generated(&name)
+        };
+        if !remove {
             continue;
         }
         let path = entry.path();
@@ -248,14 +278,32 @@ pub fn remove_unused(dir: &Path, meta: &MapMeta) {
     }
 }
 
+/// Writes a file through a temporary one (named for this process, so two programs saving at
+/// once don't share it), so readers see the old or the new file, never part of one. Synced
+/// before the swap, so a crash can't leave the new name on an empty file.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.tmp", std::process::id()));
-    let result = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    let result = write_synced(Path::new(&tmp), data).and_then(|()| std::fs::rename(&tmp, path));
+    // And the rename itself (on Unix, a folder can be synced; Windows commits it already).
+    #[cfg(unix)]
+    if result.is_ok()
+        && let Some(dir) = path.parent()
+    {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result.with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes a file and waits until it's on disk.
+pub fn write_synced(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(data)?;
+    file.sync_all()
 }
 
 /// Friendly names for the official maps; modded maps fall back to their world name.

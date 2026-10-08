@@ -103,6 +103,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     let (layer, mut tiles_written) = build_layer(tiles, &layout, &dir, &generation, progress)?;
     let (pois_file, mut pois_written) = write_pois(&dir, &generation, &pois)?;
 
+    let old = maps::load(&dir).ok().map(|p| p.meta);
     let meta = MapMeta {
         id: source.id.clone(),
         name: source.name.clone(),
@@ -122,7 +123,7 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     maps::save_meta(&dir, &meta)?;
     tiles_written.keep();
     pois_written.keep();
-    maps::remove_unused(&dir, &meta);
+    maps::remove_unused(&dir, old.as_ref(), &meta);
     Ok(MapPack { meta, dir })
 }
 
@@ -137,6 +138,7 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
         *pack = current;
         return Ok(());
     }
+    let old = current.meta.clone();
     let mut meta = current.meta;
     let mut written = None;
     if meta.pois_source != source.pois_fingerprint() {
@@ -148,7 +150,7 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
     maps::save_meta(&pack.dir, &meta)?;
     if let Some(mut written) = written {
         written.keep();
-        maps::remove_unused(&pack.dir, &meta);
+        maps::remove_unused(&pack.dir, Some(&old), &meta);
     }
     pack.meta = meta;
     Ok(())
@@ -160,7 +162,7 @@ fn write_pois(dir: &Path, generation: &str, json: &[u8]) -> Result<(String, Remo
     let name = format!("pois-{generation}.json");
     let path = dir.join(&name);
     let guard = RemoveOnDrop(Some(path.clone()));
-    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    maps::write_synced(&path, json).with_context(|| format!("writing {}", path.display()))?;
     Ok((name, guard))
 }
 
@@ -479,8 +481,9 @@ pub fn save_tile(image: &RgbaImage, path: &Path) -> Result<()> {
     } else {
         image.write_with_encoder(image::codecs::png::PngEncoder::new(&mut file))?;
     }
-    // Dropping the writer would hide a failed final write (a full disk, say).
-    std::io::Write::flush(&mut file)?;
+    // Dropping the writer would hide a failed final write (a full disk, say). Synced so that
+    // once map.toml points here, a crash can't leave the tile empty.
+    file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
     Ok(())
 }
 
@@ -561,19 +564,18 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         }
         current = downsample(&current);
     }
-    let mut meta = maps::load(&dir)
-        .map(|p| p.meta)
-        .unwrap_or_else(|_| MapMeta {
-            id: id.into(),
-            name: name.into(),
-            world_size,
-            format: 0,
-            source: String::new(),
-            mod_id: None,
-            pois_source: String::new(),
-            layers: Vec::new(),
-            pois: None,
-        });
+    let old = maps::load(&dir).ok().map(|p| p.meta);
+    let mut meta = old.clone().unwrap_or_else(|| MapMeta {
+        id: id.into(),
+        name: name.into(),
+        world_size,
+        format: 0,
+        source: String::new(),
+        mod_id: None,
+        pois_source: String::new(),
+        layers: Vec::new(),
+        pois: None,
+    });
     meta.name = name.into();
     meta.world_size = world_size;
     // The overlay draws the first layer: the picture replaces the satellite view.
@@ -581,6 +583,6 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
     meta.layers.insert(0, layer);
     maps::save_meta(&dir, &meta)?;
     work.keep();
-    maps::remove_unused(&dir, &meta);
+    maps::remove_unused(&dir, old.as_ref(), &meta);
     Ok(MapPack { meta, dir })
 }

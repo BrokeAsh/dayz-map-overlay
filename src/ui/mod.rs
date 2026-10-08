@@ -12,6 +12,7 @@ use egui::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::game::Session;
@@ -84,6 +85,8 @@ pub struct OverlayApp {
     seen_generation: u64,
     /// When the maps were last read, to notice imports made by another program.
     maps_read: std::time::SystemTime,
+    /// When the overlay last looked for those, while open.
+    maps_checked: Instant,
     session: Session,
     show_maps_window: bool,
     close_requested: bool,
@@ -109,6 +112,7 @@ impl OverlayApp {
             library,
             seen_generation: 0,
             maps_read: std::time::SystemTime::now(),
+            maps_checked: Instant::now(),
             session: Session::default(),
             show_maps_window: false,
             close_requested: false,
@@ -175,14 +179,20 @@ impl OverlayApp {
     }
 
     pub fn on_show(&mut self) {
-        // `dayz-map import` may have rebuilt a map meanwhile (its old tiles are gone).
+        self.reload_if_changed();
+        self.sync_library();
+        self.close_requested = false;
+    }
+
+    /// Rereads the maps if another program (`dayz-map import`) rebuilt one, whose old tiles are
+    /// gone.
+    fn reload_if_changed(&mut self) {
+        self.maps_checked = Instant::now();
         if self.maps_changed() {
             self.tiles.clear();
             self.pois.clear();
             self.reload_maps();
         }
-        self.sync_library();
-        self.close_requested = false;
     }
 
     /// Whether any map's `map.toml` was saved since the maps were read.
@@ -211,6 +221,9 @@ impl OverlayApp {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        if self.maps_checked.elapsed() > Duration::from_secs(2) {
+            self.reload_if_changed();
+        }
         let ctx = ui.ctx().clone();
         let screen = ui.max_rect();
         self.tiles.begin_frame(&ctx);

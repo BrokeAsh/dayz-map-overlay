@@ -96,19 +96,17 @@ pub struct WorldSource {
 }
 
 impl WorldSource {
-    /// Changes whenever the source files change (a mod update) or the importer does.
+    /// Changes whenever the satellite files change (a mod update) or the importer does. (The
+    /// points of interest have their own, below.)
     pub fn fingerprint(&self) -> String {
-        let mut parts = vec![
+        // The stamp from when the file was scanned, which the entries' offsets belong to: if it
+        // changes during an import, the next scan sees it and imports again.
+        [
             IMPORT_VERSION.to_string(),
             self.satellite.pbo.path.display().to_string(),
-        ];
-        // The stamps from when the files were scanned, which the entries' offsets belong to:
-        // if a file changes during an import, the next scan sees it and imports again.
-        parts.push(self.satellite.pbo.opened.clone());
-        if let Some(economy) = &self.economy {
-            parts.push(economy.pbo.opened.clone());
-        }
-        parts.join("|")
+            self.satellite.pbo.opened.clone(),
+        ]
+        .join("|")
     }
 
     /// Changes when the files the points of interest come from change (including the scripts
@@ -131,7 +129,14 @@ impl WorldSource {
     /// Whether an installed pack was built from these files as they are now. (A mod update can
     /// also resize the terrain without touching its tiles.)
     pub fn is_current(&self, pack: &maps::MapPack) -> bool {
-        pack.meta.source == self.fingerprint()
+        let fingerprint = self.fingerprint();
+        // Before 0.2 the economy file's stamp followed; the points of interest track it now.
+        (pack.meta.source == fingerprint
+            || pack
+                .meta
+                .source
+                .strip_prefix(&fingerprint)
+                .is_some_and(|rest| rest.starts_with('|')))
             && self
                 .world_size
                 .is_none_or(|size| (size.round() - pack.meta.world_size).abs() < 1.0)
