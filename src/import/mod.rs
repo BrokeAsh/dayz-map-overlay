@@ -95,11 +95,13 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
     {
         return Ok(pack);
     }
-    // Points of interest first, so a game file that can't be read stops the import before the
-    // old tiles go; but saved only with the new tiles, so a failed import leaves the old map
-    // whole.
+    // Points of interest first: a game file that can't be read stops the import before the
+    // slow part. Everything is written beside the old map, which stays in use until the new
+    // map.toml is saved.
+    let generation = maps::generation();
     let pois = pois_json(source)?;
-    let layer = build_layer(tiles, &layout, &dir, progress)?;
+    let (layer, mut tiles_written) = build_layer(tiles, &layout, &dir, &generation, progress)?;
+    let (pois_file, mut pois_written) = write_pois(&dir, &generation, &pois)?;
 
     let meta = MapMeta {
         id: source.id.clone(),
@@ -115,8 +117,12 @@ pub fn import_world(source: &WorldSource, progress: &(dyn Fn(Progress) + Sync)) 
             .filter(|l| l.id == PICTURE)
             .chain([layer])
             .collect(),
+        pois: Some(pois_file),
     };
-    publish(&dir, &pois, &meta)?;
+    maps::save_meta(&dir, &meta)?;
+    tiles_written.keep();
+    pois_written.keep();
+    maps::remove_unused(&dir, &meta);
     Ok(MapPack { meta, dir })
 }
 
@@ -132,18 +138,30 @@ pub fn refresh_pois(source: &WorldSource, pack: &mut MapPack) -> Result<()> {
         return Ok(());
     }
     let mut meta = current.meta;
+    let mut written = None;
     if meta.pois_source != source.pois_fingerprint() {
-        write_pois(&pack.dir, &pois_json(source)?)?;
+        let (file, guard) = write_pois(&pack.dir, &maps::generation(), &pois_json(source)?)?;
+        meta.pois = Some(file);
+        written = Some(guard);
     }
     meta.pois_source = source.pois_fingerprint();
     maps::save_meta(&pack.dir, &meta)?;
+    if let Some(mut written) = written {
+        written.keep();
+        maps::remove_unused(&pack.dir, &meta);
+    }
     pack.meta = meta;
     Ok(())
 }
 
-/// Written whole, then swapped in, so the overlay never reads half a file.
-fn write_pois(dir: &Path, json: &[u8]) -> Result<()> {
-    maps::write_atomic(&dir.join("pois.json"), json)
+/// Writes a new points-of-interest file (unused until map.toml names it), deleted again unless
+/// kept.
+fn write_pois(dir: &Path, generation: &str, json: &[u8]) -> Result<(String, RemoveOnDrop)> {
+    let name = format!("pois-{generation}.json");
+    let path = dir.join(&name);
+    let guard = RemoveOnDrop(Some(path.clone()));
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok((name, guard))
 }
 
 /// The world's points of interest, as `pois.json` holds them.
@@ -229,12 +247,14 @@ fn water_markers(source: &WorldSource) -> Result<Vec<poi::Marker>> {
     Ok(markers)
 }
 
+/// Builds the satellite layer in a new folder, deleted again unless kept.
 fn build_layer(
     source: &TileSource,
     layout: &TileLayout,
     map_dir: &Path,
+    generation: &str,
     progress: &(dyn Fn(Progress) + Sync),
-) -> Result<LayerMeta> {
+) -> Result<(LayerMeta, RemoveOnDrop)> {
     // Empty tiles are stored tiny, so take the size from the largest one.
     let sample = source
         .tiles
@@ -255,8 +275,10 @@ fn build_layer(
         );
     }
     let max_level = source.grid.next_power_of_two().trailing_zeros();
+    let folder = format!("{SATELLITE}-{generation}");
     let meta = LayerMeta {
         id: SATELLITE.into(),
+        dir: Some(folder.clone()),
         name: "Satellite".into(),
         tile_px,
         grid: source.grid,
@@ -266,14 +288,10 @@ fn build_layer(
         origin: [layout.left, layout.top],
     };
 
-    let final_dir = map_dir.join(SATELLITE);
-    let work_dir = map_dir.join(format!("{SATELLITE}.importing"));
-    if work_dir.exists() {
-        std::fs::remove_dir_all(&work_dir)?;
-    }
-    // Removed if anything below fails (or panics); a map with a bad tile would otherwise leave
-    // hundreds of MB behind on every attempt.
-    let mut work = RemoveOnDrop(Some(work_dir.clone()));
+    let work_dir = map_dir.join(&folder);
+    // Removed if anything fails (or panics) before the map uses it; a map with a bad tile would
+    // otherwise leave hundreds of MB behind on every attempt.
+    let work = RemoveOnDrop(Some(work_dir.clone()));
     for level in 0..=max_level {
         std::fs::create_dir_all(work_dir.join(level.to_string()))?;
     }
@@ -330,47 +348,26 @@ fn build_layer(
         below = current;
     }
 
-    if final_dir.exists() {
-        std::fs::remove_dir_all(&final_dir)?;
-    }
-    std::fs::rename(&work_dir, &final_dir)?;
-    work.0 = None;
-    Ok(meta)
+    Ok((meta, work))
 }
 
-/// Saves the points of interest and metadata for tiles just swapped in; if either fails, the old
-/// metadata is set aside as below.
-fn publish(dir: &Path, pois: &[u8], meta: &MapMeta) -> Result<()> {
-    if let Err(e) = write_pois(dir, pois) {
-        let _ = std::fs::rename(dir.join("map.toml"), dir.join("map.toml.stale"));
-        return Err(e);
-    }
-    save_meta_or_forget(dir, meta)
-}
-
-/// Saves the metadata for tiles just swapped in. If that fails, the old metadata no longer
-/// describes the tiles, so it's set aside (`maps::recorded_layers` still reads it) and the map
-/// counts as not installed until the next import.
-fn save_meta_or_forget(dir: &Path, meta: &MapMeta) -> Result<()> {
-    let result = maps::save_meta(dir, meta);
-    match &result {
-        Ok(()) => {
-            let _ = std::fs::remove_file(dir.join("map.toml.stale"));
-        }
-        Err(_) => {
-            let _ = std::fs::rename(dir.join("map.toml"), dir.join("map.toml.stale"));
-        }
-    }
-    result
-}
-
-/// A folder to delete when dropped, unless taken out first.
+/// A folder or file to delete when dropped, unless kept.
 struct RemoveOnDrop(Option<std::path::PathBuf>);
+
+impl RemoveOnDrop {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        if let Some(dir) = &self.0 {
-            let _ = std::fs::remove_dir_all(dir);
+        if let Some(path) = &self.0 {
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
         }
     }
 }
@@ -530,8 +527,13 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         .resize_exact(side, side, imageops::FilterType::Lanczos3)
         .into_rgba8();
     let max_level = grid.next_power_of_two().trailing_zeros();
+    let dir = maps::maps_dir().join(id);
+    let (_lock, _) = ImportLock::take(&dir)?;
+    // Built beside the old picture, which stays in use until the new map.toml is saved.
+    let folder = format!("{PICTURE}-{}", maps::generation());
     let layer = LayerMeta {
         id: PICTURE.into(),
+        dir: Some(folder.clone()),
         name: "Picture".into(),
         tile_px: TILE_PX,
         grid,
@@ -540,14 +542,7 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         tile_m: world_size / f64::from(grid),
         origin: [0.0, world_size],
     };
-    let dir = maps::maps_dir().join(id);
-    let (_lock, _) = ImportLock::take(&dir)?;
-    // Built beside the old picture, which stays until the new one is complete.
-    let layer_dir = dir.join(&layer.id);
-    let work_dir = dir.join(format!("{}.importing", layer.id));
-    if work_dir.exists() {
-        std::fs::remove_dir_all(&work_dir)?;
-    }
+    let work_dir = dir.join(&folder);
     let mut work = RemoveOnDrop(Some(work_dir.clone()));
     let mut current = image;
     for level in (0..=max_level).rev() {
@@ -566,11 +561,6 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
         }
         current = downsample(&current);
     }
-    if layer_dir.exists() {
-        std::fs::remove_dir_all(&layer_dir)?;
-    }
-    std::fs::rename(&work_dir, &layer_dir)?;
-    work.0 = None;
     let mut meta = maps::load(&dir)
         .map(|p| p.meta)
         .unwrap_or_else(|_| MapMeta {
@@ -582,12 +572,15 @@ pub fn import_image(id: &str, name: &str, world_size: f64, picture: &Path) -> Re
             mod_id: None,
             pois_source: String::new(),
             layers: Vec::new(),
+            pois: None,
         });
     meta.name = name.into();
     meta.world_size = world_size;
     // The overlay draws the first layer: the picture replaces the satellite view.
     meta.layers.retain(|l| l.id != layer.id);
     meta.layers.insert(0, layer);
-    save_meta_or_forget(&dir, &meta)?;
+    maps::save_meta(&dir, &meta)?;
+    work.keep();
+    maps::remove_unused(&dir, &meta);
     Ok(MapPack { meta, dir })
 }

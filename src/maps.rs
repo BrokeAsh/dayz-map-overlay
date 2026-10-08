@@ -1,8 +1,13 @@
 //! Installed map packs.
 //!
-//! Each map lives in `<data dir>/maps/<id>/` with a `map.toml` and one tile pyramid per layer:
-//! `<layer>/<level>/<x>_<y>.<ext>`. Level `max_level` is full resolution with `grid` tiles per
-//! side; each level below halves the resolution. Tile `y = 0` is the north edge.
+//! Each map lives in `<data dir>/maps/<id>/` with a `map.toml`, its points of interest, and one
+//! tile pyramid per layer: `<layer folder>/<level>/<x>_<y>.<ext>`. Level `max_level` is full
+//! resolution with `grid` tiles per side; each level below halves the resolution. Tile `y = 0`
+//! is the north edge.
+//!
+//! Each import writes new folders and files beside the old ones (`satellite-<generation>`),
+//! and saving `map.toml` switches to them in one step, so a failed or interrupted import
+//! leaves the previous map whole. The old ones are deleted afterwards.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -29,11 +34,17 @@ pub struct MapMeta {
     pub pois_source: String,
     #[serde(default)]
     pub layers: Vec<LayerMeta>,
+    /// The points-of-interest file (`pois.json` in maps from before 0.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pois: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerMeta {
     pub id: String,
+    /// Its folder, if not named after `id` (maps from before 0.2 are).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
     pub name: String,
     pub tile_px: u32,
     /// Tiles per side at full resolution.
@@ -66,15 +77,18 @@ pub struct MapPack {
 
 impl MapPack {
     pub fn pois(&self) -> crate::import::poi::Pois {
-        std::fs::read(self.dir.join("pois.json"))
-            .ok()
-            .and_then(|d| serde_json::from_slice(&d).ok())
-            .unwrap_or_default()
+        std::fs::read(
+            self.dir
+                .join(self.meta.pois.as_deref().unwrap_or("pois.json")),
+        )
+        .ok()
+        .and_then(|d| serde_json::from_slice(&d).ok())
+        .unwrap_or_default()
     }
 
     pub fn tile_path(&self, layer: &LayerMeta, level: u32, x: u32, y: u32) -> PathBuf {
         self.dir
-            .join(&layer.id)
+            .join(layer.dir.as_deref().unwrap_or(&layer.id))
             .join(level.to_string())
             .join(format!("{x}_{y}.{}", layer.ext))
     }
@@ -111,6 +125,11 @@ impl MapMeta {
         if let Some(layer) = self.layers.iter().find(|l| !l.is_valid()) {
             anyhow::bail!("bad layer {:?}", layer.id);
         }
+        if let Some(pois) = &self.pois
+            && !pois.strip_suffix(".json").is_some_and(valid_id)
+        {
+            anyhow::bail!("bad points-of-interest file {pois:?}");
+        }
         Ok(())
     }
 }
@@ -118,6 +137,7 @@ impl MapMeta {
 impl LayerMeta {
     fn is_valid(&self) -> bool {
         valid_id(&self.id)
+            && self.dir.as_deref().is_none_or(valid_id)
             && (1..=8192).contains(&self.tile_px)
             && (1..=4096).contains(&self.grid)
             && self.max_level <= 16
@@ -190,6 +210,44 @@ pub fn save_meta(dir: &Path, meta: &MapMeta) -> Result<()> {
 
 /// Writes a file through a temporary one (named for this process, so two programs saving at
 /// once don't share it), so readers see the old or the new file, never part of one.
+/// A name suffix for one import's folders and files, newer ones sorting later.
+pub fn generation() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:x}", now.as_micros())
+}
+
+/// Deletes the folders and files of earlier imports that `meta` (just saved) no longer uses.
+/// Best effort: what can't be deleted now (a tile being read) goes after the next import.
+pub fn remove_unused(dir: &Path, meta: &MapMeta) {
+    let used: Vec<&str> = meta
+        .layers
+        .iter()
+        .map(|l| l.dir.as_deref().unwrap_or(&l.id))
+        .chain([meta.pois.as_deref().unwrap_or("pois.json")])
+        .collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ours = ["satellite", "picture", "pois"]
+            .iter()
+            .any(|p| name.starts_with(p))
+            || name == "map.toml.stale";
+        if !ours || used.contains(&name.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.tmp", std::process::id()));

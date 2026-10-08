@@ -82,6 +82,8 @@ pub struct OverlayApp {
     pois: HashMap<String, Arc<LoadedPois>>,
     library: Library,
     seen_generation: u64,
+    /// When the maps were last read, to notice imports made by another program.
+    maps_read: std::time::SystemTime,
     session: Session,
     show_maps_window: bool,
     close_requested: bool,
@@ -106,6 +108,7 @@ impl OverlayApp {
             pois: HashMap::new(),
             library,
             seen_generation: 0,
+            maps_read: std::time::SystemTime::now(),
             session: Session::default(),
             show_maps_window: false,
             close_requested: false,
@@ -121,6 +124,7 @@ impl OverlayApp {
             self.current
                 .map(|i| self.maps[i].meta.id.clone())
                 .or(self.config.view.map.clone());
+        self.maps_read = std::time::SystemTime::now();
         self.maps = maps::load_all();
         self.current = selected
             .and_then(|id| self.maps.iter().position(|m| m.meta.id == id))
@@ -171,8 +175,26 @@ impl OverlayApp {
     }
 
     pub fn on_show(&mut self) {
+        // `dayz-map import` may have rebuilt a map meanwhile (its old tiles are gone).
+        if self.maps_changed() {
+            self.tiles.clear();
+            self.pois.clear();
+            self.reload_maps();
+        }
         self.sync_library();
         self.close_requested = false;
+    }
+
+    /// Whether any map's `map.toml` was saved since the maps were read.
+    fn maps_changed(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(maps::maps_dir()) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            std::fs::metadata(entry.path().join("map.toml"))
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t > self.maps_read)
+        })
     }
 
     pub fn on_hide(&mut self) {
