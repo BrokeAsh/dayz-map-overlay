@@ -157,16 +157,21 @@ impl Pbo {
     fn unpack(&self, entry: &PboEntry, len: usize, max: usize) -> Result<Vec<u8>> {
         match entry.method {
             0 => {
-                let mut data = self.read_raw(entry, entry.size as usize)?;
-                data.truncate(len);
-                Ok(data)
+                let want = len.min(entry.size as usize);
+                if want > max {
+                    bail!("{}: entry too large", entry.name);
+                }
+                self.read_raw(entry, want)
             }
             CPRS => {
                 let want = len.min(entry.original_size as usize);
                 if want > max {
                     bail!("{}: compressed entry too large", entry.name);
                 }
-                let packed = self.read_raw(entry, entry.size as usize)?;
+                // At worst one flag byte per eight literal bytes, plus the checksum: no need to
+                // read more than that for `want` bytes.
+                let packed_len = (want + want / 8 + 16).min(entry.size as usize);
+                let packed = self.read_raw(entry, packed_len)?;
                 let data = super::lzss::decompress(&packed, want);
                 if data.len() != want {
                     bail!("{}: corrupt compressed entry", entry.name);

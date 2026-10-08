@@ -221,8 +221,9 @@ fn load(path: &PathBuf) -> Loaded {
         Err(image::ImageError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Loaded::Missing;
         }
-        // A damaged tile stays missing; one that couldn't be read is tried again.
-        Err(image::ImageError::IoError(e)) => {
+        // A damaged tile (cut short included) stays missing; one that couldn't be read is tried
+        // again.
+        Err(image::ImageError::IoError(e)) if e.kind() != std::io::ErrorKind::UnexpectedEof => {
             log::warn!("{}: {e}", path.display());
             return Loaded::Failed;
         }
