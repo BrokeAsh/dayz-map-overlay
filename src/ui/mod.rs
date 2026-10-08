@@ -184,7 +184,11 @@ impl OverlayApp {
             self.pois.clear();
             self.reload_maps();
         }
-        if let Some(id) = ready {
+        // Only while the game is still on that map: the player may have left (and picked
+        // another map) while it was being built.
+        if let Some(id) = ready
+            && self.session.world.as_deref() == Some(id.as_str())
+        {
             self.select(&id);
         }
     }
