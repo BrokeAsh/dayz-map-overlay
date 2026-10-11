@@ -96,7 +96,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         let _ = session_tx.send(HostEvent::Session(session));
     });
 
-    let egui_ctx = egui::Context::default();
+    let egui_ctx = super::egui_context();
     let repaint_tx = std::sync::Mutex::new(tx);
     egui_ctx.set_request_repaint_callback(move |info| {
         let _ = repaint_tx

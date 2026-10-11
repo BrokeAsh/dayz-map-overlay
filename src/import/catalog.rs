@@ -1,13 +1,14 @@
 //! Finds every importable terrain in the game folder and the Steam Workshop folders.
 //!
 //! A terrain is put together from several archives, often in the same mod:
-//! - a world PBO with the `.wrp` file and `config.bin` (`CfgWorlds`: id, terrain file, place names),
+//! - a world PBO with the `.wrp` file and `config.bin` (`CfgWorlds`: id, terrain file, place names;
+//!   a mod may keep the config in another of its archives),
 //! - a data PBO with the satellite tiles and their materials,
 //! - a Central Economy PBO with loot and event positions.
 //!
 //! The world id is the `CfgWorlds` class name, which is also what the game reports when it joins
 //! a server (`mpmissions\__cur_mp.<world>`). Only archive headers are read while scanning, plus
-//! the configs of world archives, so a full scan of hundreds of mods takes about a second.
+//! the configs of world archives and map mods, so a full scan of hundreds of mods takes about a second.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -91,6 +92,8 @@ pub struct WorldSource {
     pub economy: Option<EconomySource>,
     /// `None` when the world file can't be read (encrypted `.ebo`).
     pub terrain: Option<TerrainFile>,
+    /// The archive with the world's config (its place names), when it isn't the terrain's.
+    pub config: Option<Arc<Pbo>>,
     /// Archives with scripts that can define drinkable classes: the game's and the map mod's.
     pub scripts: Vec<Arc<Pbo>>,
 }
@@ -118,6 +121,7 @@ impl WorldSource {
             .iter()
             .map(|e| &e.pbo)
             .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.config)
             .chain(&self.scripts)
         {
             parts.push(pbo.path.display().to_string());
@@ -147,6 +151,7 @@ impl WorldSource {
         std::iter::once(&self.satellite.pbo)
             .chain(self.economy.iter().map(|e| &e.pbo))
             .chain(self.terrain.iter().map(|t| &t.pbo))
+            .chain(&self.config)
             .chain(&self.scripts)
             .any(|pbo| pbo.changed())
     }
@@ -192,6 +197,7 @@ impl Catalog {
             }
             if best.places.is_empty() {
                 best.places = other.places.clone();
+                best.config = other.config.clone();
             }
             if best.economy.is_none() {
                 best.economy = other.economy.clone();
@@ -240,6 +246,8 @@ struct WorldDef {
     /// Directory of the `.wrp`, lower-case, `\`-separated.
     anchor: String,
     places: Vec<Place>,
+    /// The archive the place names came from.
+    config: Arc<Pbo>,
     mod_id: Option<String>,
     mod_dir: Option<PathBuf>,
 }
@@ -253,7 +261,6 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
 
     let mut tiles = Vec::new();
     let mut economies = Vec::new();
-    let mut defs = Vec::new();
     let mut scripts: HashMap<Option<String>, Vec<Arc<Pbo>>> = HashMap::new();
     for archive in &archives {
         let has_scripts = archive
@@ -273,8 +280,20 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         if let Some(economy) = economy_source(&archive.pbo) {
             economies.push((archive, economy));
         }
-        defs.extend(world_defs(archive));
     }
+    // A mod's worlds are looked for across all its archives; the game's archives each hold their
+    // own world's config, and reading all of the game's would slow every scan.
+    let mut mods: Vec<(&Option<String>, Vec<&Archive>)> = Vec::new();
+    for archive in &archives {
+        match mods.iter_mut().find(|(id, _)| **id == archive.mod_id) {
+            Some((_, group)) if archive.mod_id.is_some() => group.push(archive),
+            _ => mods.push((&archive.mod_id, vec![archive])),
+        }
+    }
+    let defs: Vec<WorldDef> = mods
+        .iter()
+        .flat_map(|(_, group)| world_defs(group))
+        .collect();
 
     let mut worlds = Vec::new();
     let mut used_tiles = vec![false; tiles.len()];
@@ -312,6 +331,7 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             satellite: tiles[i].1.clone(),
             economy,
             terrain: Some(def.terrain.clone()),
+            config: (!Arc::ptr_eq(&def.config, &def.terrain.pbo)).then(|| def.config.clone()),
             scripts: world_scripts,
         });
     }
@@ -340,6 +360,7 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             satellite: source.clone(),
             economy: best_economy(&economies, &archive.mod_id, &anchor),
             terrain: None,
+            config: None,
             scripts: Vec::new(),
         });
     }
@@ -523,42 +544,53 @@ fn economy_source(pbo: &Arc<Pbo>) -> Option<EconomySource> {
 }
 
 /// Worlds defined by an archive that also contains their `.wrp`.
-fn world_defs(archive: &Archive) -> Vec<WorldDef> {
-    let pbo = &archive.pbo;
-    let wrps: HashMap<String, usize> = pbo
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.name.to_ascii_lowercase().ends_with(".wrp"))
-        .map(|(i, e)| (pbo.full_path(e), i))
-        .collect();
-    if wrps.is_empty() {
+/// The worlds in a group of archives (one mod's, or a single archive of the game's). A config
+/// names each world's `.wrp`, which is usually in the same archive but can be in another of the
+/// mod's (Chiemsee keeps its config in `worldconfig.pbo` and its terrain in `world.pbo`).
+fn world_defs(group: &[&Archive]) -> Vec<WorldDef> {
+    let has_terrain = group.iter().any(|a| {
+        a.pbo
+            .entries
+            .iter()
+            .any(|e| e.name.to_ascii_lowercase().ends_with(".wrp"))
+    });
+    if !has_terrain {
         return Vec::new();
     }
-    // The world config is usually `config.bin` at the root, but can sit next to the `.wrp`.
-    let configs: Vec<rap::Class> = pbo
-        .entries
+    let configs: Vec<(&Archive, rap::Class)> = group
         .iter()
-        .filter(|e| e.name.to_ascii_lowercase().rsplit('\\').next() == Some("config.bin"))
-        .filter_map(|e| match pbo.read(e).map(|d| rap::parse(&d)) {
-            Ok(Ok(config)) => Some(config),
-            Ok(Err(err)) | Err(err) => {
-                log::debug!("{} {}: {err:#}", pbo.path.display(), e.name);
-                None
-            }
-        })
+        .flat_map(|archive| configs(archive).into_iter().map(move |c| (*archive, c)))
         .collect();
-    configs
-        .iter()
-        .filter_map(|config| config.class("CfgWorlds"))
-        .flat_map(|worlds| worlds.classes())
-        .filter_map(|(class, world)| {
-            let wrp_path = world
-                .value("worldName")?
-                .as_str()?
-                .trim_start_matches('\\')
-                .to_lowercase();
-            let index = *wrps.get(&wrp_path)?;
+    match_worlds(group, &configs)
+}
+
+/// Pairs the worlds in `configs` with their `.wrp` files in `group`.
+fn match_worlds(group: &[&Archive], configs: &[(&Archive, rap::Class)]) -> Vec<WorldDef> {
+    let mut wrps: HashMap<String, (&Archive, usize)> = HashMap::new();
+    for archive in group {
+        for (i, e) in archive.pbo.entries.iter().enumerate() {
+            if e.name.to_ascii_lowercase().ends_with(".wrp") {
+                wrps.entry(archive.pbo.full_path(e)).or_insert((archive, i));
+            }
+        }
+    }
+    let mut defs: Vec<WorldDef> = Vec::new();
+    for (config_archive, config) in configs {
+        let Some(worlds) = config.class("CfgWorlds") else {
+            continue;
+        };
+        for (class, world) in worlds.classes() {
+            let Some(wrp_path) = world
+                .value("worldName")
+                .and_then(|v| v.as_str())
+                .map(|p| p.trim_start_matches('\\').to_lowercase())
+            else {
+                continue;
+            };
+            let Some(&(archive, index)) = wrps.get(&wrp_path) else {
+                continue;
+            };
+            let pbo = &archive.pbo;
             let size = pbo
                 .read_prefix(&pbo.entries[index], wrp::HEADER_LEN)
                 .ok()
@@ -570,7 +602,7 @@ fn world_defs(archive: &Archive) -> Vec<WorldDef> {
                 .value("description")
                 .and_then(|d| d.as_str())
                 .map(str::to_string);
-            Some(WorldDef {
+            let def = WorldDef {
                 class: class.to_string(),
                 terrain: TerrainFile {
                     pbo: pbo.clone(),
@@ -580,9 +612,48 @@ fn world_defs(archive: &Archive) -> Vec<WorldDef> {
                 size,
                 anchor,
                 places: poi::places(world),
+                config: config_archive.pbo.clone(),
                 mod_id: archive.mod_id.clone(),
                 mod_dir: archive.mod_dir.clone(),
-            })
+            };
+            // Defined twice (once more by a patch, say): the one with more place names.
+            match defs
+                .iter_mut()
+                .find(|d| d.class.eq_ignore_ascii_case(class))
+            {
+                Some(d) if d.places.len() < def.places.len() => *d = def,
+                Some(_) => {}
+                None => defs.push(def),
+            }
+        }
+    }
+    // The place names may come from another config than the one naming the terrain.
+    for def in defs.iter_mut().filter(|d| d.places.is_empty()) {
+        let found = configs.iter().find_map(|(archive, config)| {
+            let world = config.class("CfgWorlds")?.class(&def.class)?;
+            let places = poi::places(world);
+            (!places.is_empty()).then(|| (archive.pbo.clone(), places))
+        });
+        if let Some((pbo, places)) = found {
+            def.config = pbo;
+            def.places = places;
+        }
+    }
+    defs
+}
+
+/// An archive's configs: usually `config.bin` at its root, but one can sit next to a `.wrp`.
+fn configs(archive: &Archive) -> Vec<rap::Class> {
+    let pbo = &archive.pbo;
+    pbo.entries
+        .iter()
+        .filter(|e| e.name.to_ascii_lowercase().rsplit('\\').next() == Some("config.bin"))
+        .filter_map(|e| match pbo.read(e).map(|d| rap::parse(&d)) {
+            Ok(Ok(config)) => Some(config),
+            Ok(Err(err)) | Err(err) => {
+                log::debug!("{} {}: {err:#}", pbo.path.display(), e.name);
+                None
+            }
         })
         .collect()
 }
@@ -632,4 +703,112 @@ fn world_name(prefix: &str) -> String {
         .map(|p| p.trim_end_matches("_data").to_string())
         .find(|p| !p.is_empty() && p != "data")
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::import::pbo::PboEntry;
+    use rap::{Class, Entry, Value};
+
+    fn archive(prefix: &str, files: &[&str]) -> Archive {
+        let entries = files
+            .iter()
+            .map(|name| PboEntry {
+                name: name.to_string(),
+                method: 0,
+                original_size: 0,
+                offset: 0,
+                size: 0,
+            })
+            .collect();
+        Archive {
+            pbo: Arc::new(Pbo {
+                path: PathBuf::from(format!("/nonexistent/{prefix}.pbo")),
+                prefix: prefix.to_string(),
+                entries,
+                opened: String::new(),
+            }),
+            mod_id: Some("1580589252".into()),
+            mod_dir: None,
+        }
+    }
+
+    fn class(entries: Vec<(&str, Entry)>) -> Entry {
+        Entry::Class(Class {
+            entries: entries
+                .into_iter()
+                .map(|(n, e)| (n.to_string(), e))
+                .collect(),
+        })
+    }
+
+    fn text(s: &str) -> Entry {
+        Entry::Value(Value::Str(s.into()))
+    }
+
+    fn config(world: Vec<(&str, Entry)>) -> Class {
+        let Entry::Class(root) =
+            class(vec![("CfgWorlds", class(vec![("Chiemsee", class(world))]))])
+        else {
+            unreachable!()
+        };
+        root
+    }
+
+    fn names() -> (&'static str, Entry) {
+        let town = class(vec![
+            ("name", text("Prien")),
+            ("type", text("NameCity")),
+            (
+                "position",
+                Entry::Value(Value::Array(vec![Value::Float(100.0), Value::Float(200.0)])),
+            ),
+        ]);
+        ("Names", class(vec![("Prien", town)]))
+    }
+
+    /// Chiemsee keeps its config in `worldconfig.pbo` and its terrain in `world.pbo`.
+    #[test]
+    fn config_in_another_archive_of_the_mod() {
+        let world = archive(r"test3_map\Chiemsee\world", &["Chiemsee.wrp"]);
+        let settings = archive(r"test3_map\Chiemsee\worldconfig", &["config.bin"]);
+        let worldname = ("worldName", text(r"\test3_map\Chiemsee\world\Chiemsee.wrp"));
+        let configs = [(&settings, config(vec![worldname, names()]))];
+        let defs = match_worlds(&[&world, &settings], &configs);
+        assert_eq!(defs.len(), 1);
+        let def = &defs[0];
+        assert_eq!(def.class, "Chiemsee");
+        assert!(Arc::ptr_eq(&def.terrain.pbo, &world.pbo));
+        assert!(Arc::ptr_eq(&def.config, &settings.pbo));
+        assert_eq!(def.anchor, r"test3_map\chiemsee\world");
+        assert_eq!(def.places.len(), 1);
+        assert_eq!(def.places[0].name, "Prien");
+    }
+
+    /// One config names the terrain, another adds the place names; a repeat doesn't duplicate.
+    #[test]
+    fn place_names_from_another_config() {
+        let world = archive(r"test3_map\Chiemsee\world", &["Chiemsee.wrp", "config.bin"]);
+        let extra = archive(r"test3_map\Chiemsee\names", &["config.bin"]);
+        let worldname = || ("worldName", text(r"test3_map\Chiemsee\world\Chiemsee.wrp"));
+        let configs = [
+            (&world, config(vec![worldname()])),
+            (&extra, config(vec![names()])),
+            (&world, config(vec![worldname()])),
+        ];
+        let defs = match_worlds(&[&world, &extra], &configs);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].places.len(), 1);
+        assert!(Arc::ptr_eq(&defs[0].config, &extra.pbo));
+    }
+
+    /// A config whose terrain isn't in the group defines nothing.
+    #[test]
+    fn terrain_elsewhere_is_not_matched() {
+        let settings = archive(r"test3_map\Chiemsee\worldconfig", &["config.bin"]);
+        let worldname = ("worldName", text(r"\test3_map\Chiemsee\world\Chiemsee.wrp"));
+        let configs = [(&settings, config(vec![worldname, names()]))];
+        assert!(match_worlds(&[&settings], &configs).is_empty());
+    }
 }

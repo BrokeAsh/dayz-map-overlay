@@ -103,7 +103,8 @@ game's cursor is free over it:
 | Other maps | **Maps…** (the overlay switches back when you join a server) |
 | Close | **M**, the **×** button, or switching away from the game |
 
-The toolbar shows the map, the server's name, and sliders for map opacity and how much the
+The toolbar shows the map, the server's name and player count (with its queue, if there is
+one; updated every 30 seconds), and sliders for map opacity and how much the
 game is dimmed. Hover a marker for its name. The cursor's in-game coordinates (X east, Z north,
 in metres) show in the bottom-left corner; grid squares count from the north-west corner.
 
@@ -127,7 +128,8 @@ Maps come from the game folder and every Steam library's Workshop folder
 that uses them. A terrain is assembled from:
 
 - the world archive: the `.wrp` terrain (its size) and `config.bin` (`CfgWorlds`: the world's
-  id and place names),
+  id and place names; some mods, such as Chiemsee, keep the config in another of their
+  archives),
 - the satellite tiles (`layers\S_XXX_YYY_lco.paa`) and their materials (`P_*.rvmat`), which give
   the tile overlap and where the grid sits,
 - the Central Economy files that every map ships for its default mission.
@@ -243,8 +245,8 @@ loot. Some community servers ban third-party tools in their rules, so check your
   Linux, inside its Proton prefix). Each
   mission start logs `Creating Mission: mpmissions\__cur_mp.<world>\mission.c`; `intro.<world>`
   is the main menu. The RPT log's command line has the launcher's `-connect=ip:port:query` and
-  `-mod=` list. A Steam server query (A2S_INFO) fetches the server name, kept only if the server
-  reports the same map. If the game runs with `-nologs`, there's nothing to follow.
+  `-mod=` list. A Steam server query (A2S_INFO) every 30 seconds fetches the server name and player
+  count (the queue from its `lqs` tag), kept only if the server reports the same map. If the game runs with `-nologs`, there's nothing to follow.
 - **Library** (`src/library.rs`, `src/import/catalog.rs`): scans the game and Workshop folders
   (archive headers only, about half a second for hundreds of mods), imports the map the game is
   on if it's missing or out of date, and rebuilds maps made by older versions.

@@ -21,8 +21,18 @@ pub struct Session {
     /// `ip:port` from the launch command.
     pub server: Option<String>,
     pub server_name: Option<String>,
+    /// The server's player count, as of its last answer.
+    pub players: Option<Players>,
     /// Workshop ids (or `@folder` names) of the loaded mods.
     pub mods: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Players {
+    pub online: u32,
+    pub slots: u32,
+    /// Players waiting to get in, when the server says.
+    pub queue: Option<u32>,
 }
 
 const POLL: Duration = Duration::from_secs(1);
@@ -32,8 +42,8 @@ const RELOCATE: Duration = Duration::from_secs(10);
 const MAX_LINE: usize = 64 * 1024;
 /// How much of the script log to read at a time (and of an existing one, from its end).
 const LOG_TAIL: u64 = 4 << 20;
-/// How long to wait before asking a server that didn't answer for its name again.
-const QUERY_RETRY: Duration = Duration::from_secs(30);
+/// How often to ask the server for its name and player count (again, if it didn't answer).
+const QUERY_EVERY: Duration = Duration::from_secs(30);
 
 pub fn spawn(on_change: impl Fn(Session) + Send + 'static) {
     std::thread::Builder::new()
@@ -41,24 +51,27 @@ pub fn spawn(on_change: impl Fn(Session) + Send + 'static) {
         .spawn(move || {
             let mut watcher = Watcher::default();
             let mut last = Session::default();
+            let mut described = String::new();
             loop {
                 let session = watcher.poll();
                 if session != last {
-                    log::info!(
-                        "game: {}",
-                        match (&session.running, &session.world) {
-                            (false, _) => "not running".to_string(),
-                            (true, None) => "main menu".to_string(),
-                            (true, Some(w)) => format!(
-                                "on {w}{}",
-                                session
-                                    .server_name
-                                    .as_ref()
-                                    .map(|n| format!(" ({n})"))
-                                    .unwrap_or_default()
-                            ),
-                        }
-                    );
+                    // Not each new player count.
+                    let description = match (&session.running, &session.world) {
+                        (false, _) => "not running".to_string(),
+                        (true, None) => "main menu".to_string(),
+                        (true, Some(w)) => format!(
+                            "on {w}{}",
+                            session
+                                .server_name
+                                .as_ref()
+                                .map(|n| format!(" ({n})"))
+                                .unwrap_or_default()
+                        ),
+                    };
+                    if description != described {
+                        log::info!("game: {description}");
+                        described = description;
+                    }
                     on_change(session.clone());
                     last = session;
                 }
@@ -81,7 +94,7 @@ struct Watcher {
     rpt: Option<PathBuf>,
     query_port: Option<u16>,
     session: Session,
-    /// The last server-name query: its (server, map), the name, and when it ran.
+    /// The last server query: its (server, map), the name it gave, and when it ran.
     queried: Option<((String, String), Option<String>, Instant)>,
     /// Skipping the rest of a line too long to keep.
     overlong: bool,
@@ -124,6 +137,7 @@ impl Watcher {
             self.session.server = server;
             self.session.mods = mods;
             self.session.server_name = None;
+            self.session.players = None;
             self.queried = None;
             self.rpt = Some(rpt);
             self.query_port = query;
@@ -208,34 +222,44 @@ impl Watcher {
         lines
     }
 
-    /// Asks the server for its name once per server and map (again later if it didn't answer),
-    /// and only keeps it if the server reports the map the game is on.
+    /// Asks the server for its name and player count every so often, and only believes it if
+    /// it reports the map the game is on. A name it gave stays through a missed answer.
     fn update_server_name(&mut self) {
         let (Some(server), Some(world), Some(query)) =
             (&self.session.server, &self.session.world, self.query_port)
         else {
             self.session.server_name = None;
+            self.session.players = None;
             return;
         };
         let key = (server.clone(), world.clone());
-        if let Some((queried, name, at)) = &self.queried
-            && *queried == key
-            && (name.is_some() || at.elapsed() < QUERY_RETRY)
-        {
-            self.session.server_name = name.clone();
-            return;
-        }
-        let host = server.rsplit_once(':').map_or(server.as_str(), |(h, _)| h);
-        let name = match a2s_info(host, query) {
-            Some((name, map)) if map.eq_ignore_ascii_case(world) => Some(name),
-            Some((_, map)) => {
-                log::debug!("launch server reports {map}, not {world}; ignoring its name");
-                None
+        let mut name = match &self.queried {
+            Some((queried, name, at)) if *queried == key => {
+                if at.elapsed() < QUERY_EVERY {
+                    return;
+                }
+                name.clone()
             }
-            None => None,
+            _ => None,
         };
+        let host = server.rsplit_once(':').map_or(server.as_str(), |(h, _)| h);
+        let mut players = None;
+        match a2s_info(host, query) {
+            Some(info) if info.map.eq_ignore_ascii_case(world) => {
+                name = Some(info.name);
+                players = Some(info.players);
+            }
+            Some(info) => {
+                log::debug!(
+                    "launch server reports {}, not {world}; ignoring its answer",
+                    info.map
+                );
+            }
+            None => {}
+        }
         self.queried = Some((key, name.clone(), Instant::now()));
         self.session.server_name = name;
+        self.session.players = players;
     }
 }
 
@@ -511,8 +535,16 @@ fn process_start(_proc_dir: &Path) -> Option<SystemTime> {
     None
 }
 
-/// Steam server query (A2S_INFO): returns the server name and map.
-fn a2s_info(host: &str, port: u16) -> Option<(String, String)> {
+/// A server's answer to a Steam server query (A2S_INFO).
+#[derive(Debug, PartialEq)]
+struct Info {
+    name: String,
+    map: String,
+    players: Players,
+}
+
+/// Steam server query (A2S_INFO).
+fn a2s_info(host: &str, port: u16) -> Option<Info> {
     let addr = (host, port).to_socket_addrs().ok()?.next()?;
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
@@ -527,19 +559,119 @@ fn a2s_info(host: &str, port: u16) -> Option<(String, String)> {
         socket.send_to(&retry, addr).ok()?;
         len = socket.recv(&mut buf).ok()?;
     }
-    let data = &buf[..len];
-    if data.len() < 6 || data[4] != 0x49 {
+    parse_info(&buf[..len])
+}
+
+/// Reads an A2S_INFO reply (with its `ff ff ff ff` header). DayZ puts the queue in its tags
+/// (`lqs5`), which come in the optional extra data at the end.
+fn parse_info(data: &[u8]) -> Option<Info> {
+    let mut rest = data.strip_prefix(b"\xff\xff\xff\xff\x49")?.get(1..)?;
+    let mut text = || {
+        let end = rest.iter().position(|&b| b == 0)?;
+        let s = String::from_utf8_lossy(&rest[..end]).into_owned();
+        rest = &rest[end + 1..];
+        Some(s)
+    };
+    let name = text()?;
+    let map = text()?;
+    let _folder = text()?;
+    let _game = text()?;
+    drop(text);
+    // App id (2), players, slots, bots, server type, environment, password, VAC.
+    let fixed = rest.get(..9)?;
+    let (online, slots) = (u32::from(fixed[2]), u32::from(fixed[3]));
+    rest = &rest[9..];
+    let queue = keywords(rest).and_then(|tags| {
+        tags.split(',')
+            .find_map(|tag| tag.strip_prefix("lqs")?.parse().ok())
+    });
+    Some(Info {
+        name,
+        map,
+        players: Players {
+            online,
+            slots,
+            queue,
+        },
+    })
+}
+
+/// The keywords (tags) in an A2S_INFO reply's extra data: `rest` starts at its version string.
+fn keywords(mut rest: &[u8]) -> Option<String> {
+    let skip_text = |rest: &mut &[u8]| -> Option<()> {
+        let end = rest.iter().position(|&b| b == 0)?;
+        *rest = &rest[end + 1..];
+        Some(())
+    };
+    skip_text(&mut rest)?; // version
+    let (&flags, tail) = rest.split_first()?;
+    rest = tail;
+    if flags & 0x80 != 0 {
+        rest = rest.get(2..)?; // game port
+    }
+    if flags & 0x10 != 0 {
+        rest = rest.get(8..)?; // Steam id
+    }
+    if flags & 0x40 != 0 {
+        rest = rest.get(2..)?; // SourceTV port, then its name
+        skip_text(&mut rest)?;
+    }
+    if flags & 0x20 == 0 {
         return None;
     }
-    let mut fields = data[6..]
-        .split(|&b| b == 0)
-        .map(|s| String::from_utf8_lossy(s).into_owned());
-    Some((fields.next()?, fields.next()?))
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An A2S_INFO reply as a DayZ server sends it.
+    fn reply(keywords: Option<&str>) -> Vec<u8> {
+        let mut r = b"\xff\xff\xff\xff\x49\x11".to_vec();
+        for s in ["My Server", "chiemsee", "dayz", "DayZ"] {
+            r.extend(s.as_bytes());
+            r.push(0);
+        }
+        r.extend([0x6c, 0x08]); // app id
+        r.extend([45, 60, 0, b'd', b'w', 0, 0]); // players, slots, bots, type, os, password, vac
+        r.extend(b"1.29.163709\0");
+        match keywords {
+            Some(k) => {
+                r.push(0x80 | 0x10 | 0x20 | 0x01);
+                r.extend(2302u16.to_le_bytes());
+                r.extend(90_000_000_000u64.to_le_bytes());
+                r.extend(k.as_bytes());
+                r.push(0);
+                r.extend(221_100u64.to_le_bytes());
+            }
+            None => r.push(0),
+        }
+        r
+    }
+
+    #[test]
+    fn reads_players_and_queue() {
+        let info = parse_info(&reply(Some("battleye,no3rd,lqs7,mod,17:30"))).unwrap();
+        assert_eq!(info.name, "My Server");
+        assert_eq!(info.map, "chiemsee");
+        assert_eq!(
+            info.players,
+            Players {
+                online: 45,
+                slots: 60,
+                queue: Some(7)
+            }
+        );
+        let info = parse_info(&reply(None)).unwrap();
+        assert_eq!(info.players.queue, None);
+        assert_eq!(info.players.online, 45);
+        // Cut short anywhere: no answer rather than a wrong one.
+        let full = reply(None);
+        assert!(parse_info(&full[..20]).is_none());
+        assert!(parse_info(b"\xff\xff\xff\xff\x41abcd").is_none());
+    }
 
     #[test]
     #[cfg(unix)]

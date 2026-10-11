@@ -2,6 +2,15 @@
 
 mod gpu;
 
+/// The overlay's egui context.
+fn egui_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    // Shift normally turns the mouse wheel sideways, but players hold it to sprint: the wheel
+    // still zooms the map and scrolls the lists.
+    ctx.options_mut(|o| o.input_options.horizontal_scroll_modifier = egui::Modifiers::NONE);
+    ctx
+}
+
 /// Input that ends any click or drag in progress. Closing the overlay mid-drag means it never
 /// sees the button come up, and egui would keep dragging on the next mouse move.
 fn release_pointer() -> Vec<egui::Event> {
@@ -97,4 +106,30 @@ fn platform_run(config: Config, show: bool) -> Result<()> {
 #[cfg(windows)]
 fn platform_run(config: Config, show: bool) -> Result<()> {
     windows::run(config, show)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Shift (held to sprint) mustn't turn the wheel sideways, which would stop it zooming.
+    #[test]
+    fn shift_keeps_the_wheel_vertical() {
+        let ctx = super::egui_context();
+        let mut scrolled = egui::Vec2::ZERO;
+        for frame in 0..30 {
+            let mut input = egui::RawInput::default();
+            if frame == 0 {
+                input.events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::SHIFT,
+                });
+            }
+            let mut output =
+                ctx.run_ui(input, |ui| scrolled += ui.input(|i| i.smooth_scroll_delta));
+            output.textures_delta.clear();
+        }
+        assert!(scrolled.y > 0.0, "{scrolled:?}");
+        assert_eq!(scrolled.x, 0.0);
+    }
 }

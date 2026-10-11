@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The toolbar shows the server's player count, and its queue if there is one, updated every
+  30 seconds.
+- Holding Shift (to sprint, say) no longer stops the mouse wheel zooming the map or scrolling
+  the lists.
+- Maps whose world config is in a different archive from the terrain (Chiemsee) get their place
+  names, wells, and fresh water, and their size. They update by themselves the next time you
+  play on one (or with `dayz-map import`).
+
 ## 0.2.0
 
 - Windows 10 and 11 support. The map opens over DayZ in borderless or windowed mode without

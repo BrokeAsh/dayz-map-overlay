@@ -609,11 +609,18 @@ impl OverlayApp {
         if !s.running {
             return "DayZ not running".into();
         }
-        match (&s.world, &s.server_name, &s.server) {
-            (None, _, _) => "Main menu".into(),
+        let server = match (&s.world, &s.server_name, &s.server) {
+            (None, _, _) => return "Main menu".into(),
             (Some(_), Some(name), _) => truncate(name, 48),
             (Some(_), None, Some(address)) => address.clone(),
-            (Some(_), None, None) => "In game".into(),
+            (Some(_), None, None) => return "In game".into(),
+        };
+        match s.players {
+            Some(p) => match p.queue.filter(|q| *q > 0) {
+                Some(q) => format!("{server} · {}/{} players, {q} in queue", p.online, p.slots),
+                None => format!("{server} · {}/{} players", p.online, p.slots),
+            },
+            None => server,
         }
     }
 

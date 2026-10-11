@@ -65,7 +65,7 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         let _ = session_proxy.send_event(HostEvent::Session(session));
     });
 
-    let egui_ctx = egui::Context::default();
+    let egui_ctx = super::egui_context();
     let repaint_proxy = std::sync::Mutex::new(proxy.clone());
     egui_ctx.set_request_repaint_callback(move |info| {
         let _ = repaint_proxy
