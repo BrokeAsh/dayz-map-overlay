@@ -1,9 +1,11 @@
 //! Points of interest from a terrain's own files.
 //!
 //! - Place names come from the world config (`CfgWorlds >> <world> >> Names`).
-//! - Buildings come from the Central Economy files every map ships for its default mission:
+//! - Buildings come from the Central Economy files most maps ship for their default mission:
 //!   `mapgrouppos.xml` places each lootable building, and `mapgroupproto.xml` says what kind of
-//!   loot it spawns (through `usage` or `tag` entries).
+//!   loot it spawns (through `usage` or `tag` entries). A map without them (its servers have
+//!   them) gets the terrain's buildings that the base game's `mapgroupproto.xml` knows, with
+//!   the loot they spawn there.
 //! - Wells and fresh water come from the terrain itself (see `water`), since the economy files
 //!   only list the pumps that also spawn loot.
 //! - Event spawns (heli crashes, vehicles, ...) come from `cfgeventspawns.xml`, and static
@@ -14,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use super::rap;
+use super::{rap, wrp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
@@ -194,6 +196,52 @@ pub fn from_economy(files: &HashMap<String, Vec<u8>>) -> (Vec<Marker>, Vec<Zone>
         .map(|j| effect_zones(&j))
         .unwrap_or_default();
     (markers, zones)
+}
+
+/// Each building class's loot kinds from a `mapgroupproto.xml` among `files` (keyed by
+/// lower-case file name), for [`terrain_buildings`].
+pub fn loot_table(files: &HashMap<String, Vec<u8>>) -> HashMap<String, HashSet<String>> {
+    files
+        .get("mapgroupproto.xml")
+        .map(|p| loot_kinds(&String::from_utf8_lossy(p)))
+        .unwrap_or_default()
+}
+
+/// Markers for the terrain's buildings that `loot` (a loot table from another map) knows: for
+/// maps that don't ship their own economy files. Wells are left to
+/// `water`, which finds them all.
+pub fn terrain_buildings(
+    objects: &wrp::Objects,
+    loot: &HashMap<String, HashSet<String>>,
+) -> Vec<Marker> {
+    objects
+        .buildings()
+        .into_iter()
+        .filter_map(|(class, x, z)| {
+            // Only lootable ones: a fuel station's pumps and signs share its name.
+            let kind = building_kind(&class, Some(loot.get(&class)?))?;
+            (kind != Kind::Water).then(|| Marker {
+                kind,
+                x,
+                z,
+                label: title(&pretty(&class)),
+            })
+        })
+        .collect()
+}
+
+/// Capitalises each word, for names that only come in lower case.
+fn title(name: &str) -> String {
+    name.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// Each building prototype's loot kinds (`usage` names and container `tag` names), lower-case.
@@ -541,5 +589,62 @@ mod tests {
         assert_eq!((markers[0].x, markers[0].z), (5.0, 6.0));
         assert_eq!(pretty("Land_Mil_Barracks1"), "Mil Barracks1");
         assert_eq!(pretty("StaticHeliCrash"), "Heli Crash");
+    }
+
+    /// A map without economy files: its buildings, with what the base game's loot table says.
+    #[test]
+    fn buildings_from_the_terrain() {
+        let proto = r#"<prototype>
+            <group name="Land_Mil_Barracks1"><usage name="Military"/></group>
+            <group name="Land_FuelStation_Build"><container name="lootFloor"><tag name="floor"/></container></group>
+            <group name="Land_House_1W01"><usage name="Town"/></group>
+            <group name="Land_Misc_Well_Pump_Blue"><usage name="Town"/></group>
+        </prototype>"#;
+        let files = HashMap::from([("mapgroupproto.xml".to_string(), proto.as_bytes().to_vec())]);
+        let loot = loot_table(&files);
+        let classed = |class: &str, x: f32| wrp::ClassedObject {
+            class: class.into(),
+            x,
+            z: 1.0,
+        };
+        let objects = wrp::Objects {
+            models: Vec::new(),
+            classed: vec![
+                classed("land_mil_barracks1", 1.0),
+                classed("land_fuelstation_build", 2.0),
+                // A pump of the station: not lootable, so not a second station.
+                classed("land_fuelstation_feed", 3.0),
+                classed("land_house_1w01", 4.0),
+                // Wells are the water markers' job.
+                classed("land_misc_well_pump_blue", 5.0),
+                classed("land_rock_big", 6.0),
+            ],
+            placed: Vec::new(),
+        };
+        let found: Vec<(Kind, f32, String)> = terrain_buildings(&objects, &loot)
+            .into_iter()
+            .map(|m| (m.kind, m.x, m.label))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Kind::Military, 1.0, "Mil Barracks1".to_string()),
+                (Kind::Fuel, 2.0, "Fuelstation Build".to_string()),
+                (Kind::Civilian, 4.0, "House 1w01".to_string()),
+            ]
+        );
+
+        // A terrain that only places models: their file names stand for the classes.
+        let objects = wrp::Objects {
+            models: vec![r"dz\structures\military\barracks\Land_Mil_Barracks1.p3d".into()],
+            classed: Vec::new(),
+            placed: vec![(0, 7.0, 8.0)],
+        };
+        let found = terrain_buildings(&objects, &loot);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].kind, found[0].x, found[0].z),
+            (Kind::Military, 7.0, 8.0)
+        );
     }
 }

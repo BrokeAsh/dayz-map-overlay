@@ -176,7 +176,13 @@ fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
         .transpose()
         .context("reading the economy files")?
         .unwrap_or_default();
-    let water = water_markers(source)?;
+    let base_loot = source
+        .base_loot
+        .as_ref()
+        .map(|e| e.read_all().map(|files| poi::loot_table(&files)))
+        .transpose()
+        .context("reading the base game's loot table")?;
+    let water = terrain_markers(source, base_loot.as_ref())?;
     if water.iter().any(|m| m.kind == poi::Kind::Water) {
         // The terrain lists every well; the economy only the ones that spawn loot.
         markers.retain(|m| m.kind != poi::Kind::Water);
@@ -214,9 +220,13 @@ fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&pois)?)
 }
 
-/// The terrain's wells and fresh water. A world file that can't be read right now is an error
-/// (the caller keeps the markers it has); one that's corrupt just gives none.
-fn water_markers(source: &WorldSource) -> Result<Vec<poi::Marker>> {
+/// The terrain's wells and fresh water, and with `loot` (another map's loot table) its lootable
+/// buildings. A world file that can't be read right now is an error (the caller keeps the
+/// markers it has); one that's corrupt just gives none.
+fn terrain_markers(
+    source: &WorldSource,
+    loot: Option<&HashMap<String, std::collections::HashSet<String>>>,
+) -> Result<Vec<poi::Marker>> {
     let Some(terrain) = &source.terrain else {
         return Ok(Vec::new());
     };
@@ -228,13 +238,21 @@ fn water_markers(source: &WorldSource) -> Result<Vec<poi::Marker>> {
             return Ok(Vec::new());
         }
     };
-    let Some(objects) = wrp::objects(&data, |m| water::fresh_water(m).is_some()) else {
+    let wells = water::well_classes(&source.scripts)?;
+    // Water, and the models of wells and lootable buildings, for terrains that don't list them
+    // as classed objects.
+    let keep = |model: &str| {
+        water::fresh_water(model).is_some() || {
+            let class = wrp::model_class(model);
+            water::is_well(&class, &wells) || loot.is_some_and(|l| l.contains_key(&class))
+        }
+    };
+    let Some(objects) = wrp::objects(&data, keep) else {
         log::warn!("{}: couldn't read the world file's objects", source.name);
         return Ok(Vec::new());
     };
     drop(data);
-    let wells = water::well_classes(&source.scripts)?;
-    let markers = water::markers(&objects, &wells);
+    let mut markers = water::markers(&objects, &wells);
     log::info!(
         "{}: {} wells, {} fresh water",
         source.name,
@@ -247,6 +265,15 @@ fn water_markers(source: &WorldSource) -> Result<Vec<poi::Marker>> {
             .filter(|m| m.kind == poi::Kind::FreshWater)
             .count()
     );
+    if let Some(loot) = loot {
+        let buildings = poi::terrain_buildings(&objects, loot);
+        log::info!(
+            "{}: {} buildings from the base game's loot table",
+            source.name,
+            buildings.len()
+        );
+        markers.extend(buildings);
+    }
     Ok(markers)
 }
 

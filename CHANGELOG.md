@@ -1,11 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - The toolbar shows the server's player count, and its queue if there is one, updated every
   30 seconds.
 - Holding Shift (to sprint, say) no longer stops the mouse wheel zooming the map or scrolling
   the lists.
+- Maps that don't ship loot files (Chiemsee, Deadfall, Bitterroot, Azalea, Catalina Island,
+  New York, PNW, Valning, Stuart Island) get military, police, medical, fire station, fuel, and
+  other loot buildings: the terrain's buildings, with what the base game spawns in them. Maps
+  that only place models (no classed buildings) get their wells and buildings from those.
 - Maps whose world config is in a different archive from the terrain (Chiemsee) get their place
   names, wells, and fresh water, and their size. They update by themselves the next time you
   play on one (or with `dayz-map import`).

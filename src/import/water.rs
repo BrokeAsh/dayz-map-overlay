@@ -138,22 +138,25 @@ pub fn fresh_water(model: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether a lower-case class is one of `wells` (from [`well_classes`]).
+pub fn is_well(class: &str, wells: &HashSet<String>) -> bool {
+    wells.contains(class)
+        // Config variants of a scripted class, like `..._pump_yellow_metro`.
+        || class.match_indices('_').any(|(at, _)| wells.contains(&class[..at]))
+}
+
 /// Markers for every well (`Kind::Water`) and fresh-water area (`Kind::FreshWater`).
 pub fn markers(objects: &wrp::Objects, wells: &HashSet<String>) -> Vec<Marker> {
-    let is_well = |class: &str| {
-        wells.contains(class)
-            // Config variants of a scripted class, like `..._pump_yellow_metro`.
-            || class.match_indices('_').any(|(at, _)| wells.contains(&class[..at]))
-    };
+    let is_well = |class: &str| is_well(class, wells);
     let mut markers: Vec<Marker> = objects
-        .classed
-        .iter()
-        .filter(|o| is_well(&o.class))
-        .map(|o| Marker {
+        .buildings()
+        .into_iter()
+        .filter(|(class, ..)| is_well(class))
+        .map(|(class, x, z)| Marker {
             kind: Kind::Water,
-            x: o.x,
-            z: o.z,
-            label: if o.class.contains("pump") {
+            x,
+            z,
+            label: if class.contains("pump") {
                 "Water pump".into()
             } else {
                 "Drinking water".into()

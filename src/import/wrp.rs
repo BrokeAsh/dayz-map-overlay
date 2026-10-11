@@ -47,6 +47,32 @@ pub struct Objects {
     pub placed: Vec<(u32, f32, f32)>,
 }
 
+impl Objects {
+    /// Buildings as (lower-case config class, x, z): the classed objects, or on a terrain that
+    /// has none (some only place models), the placed objects whose model passed the filter,
+    /// named after their model as the game's buildings are (`land_mil_barracks1.p3d`).
+    pub fn buildings(&self) -> Vec<(String, f32, f32)> {
+        if !self.classed.is_empty() {
+            return self
+                .classed
+                .iter()
+                .map(|o| (o.class.clone(), o.x, o.z))
+                .collect();
+        }
+        self.placed
+            .iter()
+            .map(|&(model, x, z)| (model_class(&self.models[model as usize]), x, z))
+            .collect()
+    }
+}
+
+/// The class a model of a building is named after: its lower-case file name without `.p3d`.
+pub fn model_class(model: &str) -> String {
+    let file = model.rsplit(['\\', '/']).next().unwrap_or(model);
+    let lower = file.to_ascii_lowercase();
+    lower.strip_suffix(".p3d").unwrap_or(&lower).to_string()
+}
+
 pub struct ClassedObject {
     /// Lower-case config class, such as `land_misc_well_pump_blue`.
     pub class: String,

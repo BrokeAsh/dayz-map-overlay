@@ -132,7 +132,8 @@ that uses them. A terrain is assembled from:
   archives),
 - the satellite tiles (`layers\S_XXX_YYY_lco.paa`) and their materials (`P_*.rvmat`), which give
   the tile overlap and where the grid sits,
-- the Central Economy files that every map ships for its default mission.
+- the Central Economy files that most maps ship for their default mission (for one that
+  doesn't, the base game's).
 
 The world id is the `CfgWorlds` class name, which is what the game reports when it joins a
 server. When several mods ship the same terrain (an official and an experimental build, say),
@@ -155,11 +156,14 @@ dayz-map import-image mymap mymap.png --world-size 12800 --name "My Map"
 | Water pumps and wells (blue, tap icon) | the terrain's `.wrp`: every building whose class the game's or the map mod's scripts make a `Well` (pumps, plus mod additions such as Namalsk's lab sinks) |
 | Fresh water (blue, wave icon) | the terrain's `.wrp`: pond, lake, river, stream and spring objects, one marker per area (about 400 m) |
 | Fuel stations | buildings in `mapgrouppos.xml` |
-| Military, police, medical, fire station, hunting, industrial, civilian loot | buildings in `mapgrouppos.xml`, typed by their loot `usage`/`tag` in `mapgroupproto.xml` |
+| Military, police, medical, fire station, hunting, industrial, civilian loot | buildings in `mapgrouppos.xml`, typed by their loot `usage`/`tag` in `mapgroupproto.xml`; for a map without these files (Chiemsee, Deadfall, Bitterroot, ...), the terrain's buildings that the base game's `mapgroupproto.xml` knows |
 | Heli crashes, police cars, convoys, trains, vehicle and boat spawns, toxic zone spawns | `cfgeventspawns.xml` |
 | Static contaminated zones | `cfgeffectarea.json` |
 
-These are each map's defaults; a server can change its loot and events. Water comes from the
+These are each map's defaults; a server can change its loot and events. On a map without its
+own economy files, buildings show what they spawn in the base game, buildings the mod made
+itself are missing, and there are no event spawns or zones (`dayz-map list` says "building
+loot" for these). On Chernarus this way finds exactly the buildings its own files list. Water comes from the
 terrain itself, so it's complete, except on maps whose world file is encrypted (Sakhal), which
 fall back to the wells listed in the economy files. Points of interest are rebuilt on their own
 (in well under a second) when the importer's version or the map's files change.

@@ -22,7 +22,7 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 4;
+pub const POI_VERSION: u32 = 5;
 
 const ECONOMY_FILES: [&str; 4] = [
     "mapgrouppos.xml",
@@ -90,6 +90,9 @@ pub struct WorldSource {
     pub places: Vec<Place>,
     pub satellite: TileSource,
     pub economy: Option<EconomySource>,
+    /// Without `economy`: the base game's economy files, whose loot table says what the
+    /// terrain's buildings spawn.
+    pub base_loot: Option<EconomySource>,
     /// `None` when the world file can't be read (encrypted `.ebo`).
     pub terrain: Option<TerrainFile>,
     /// The archive with the world's config (its place names), when it isn't the terrain's.
@@ -119,6 +122,7 @@ impl WorldSource {
         for pbo in self
             .economy
             .iter()
+            .chain(&self.base_loot)
             .map(|e| &e.pbo)
             .chain(self.terrain.iter().map(|t| &t.pbo))
             .chain(&self.config)
@@ -149,7 +153,7 @@ impl WorldSource {
     /// Whether any of its archives changed since the scan, so their entry offsets are stale.
     pub fn changed_since_scan(&self) -> bool {
         std::iter::once(&self.satellite.pbo)
-            .chain(self.economy.iter().map(|e| &e.pbo))
+            .chain(self.economy.iter().chain(&self.base_loot).map(|e| &e.pbo))
             .chain(self.terrain.iter().map(|t| &t.pbo))
             .chain(&self.config)
             .chain(&self.scripts)
@@ -201,6 +205,9 @@ impl Catalog {
             }
             if best.economy.is_none() {
                 best.economy = other.economy.clone();
+                if best.economy.is_some() {
+                    best.base_loot = None;
+                }
             }
             if best.terrain.is_none() {
                 best.terrain = other.terrain.clone();
@@ -295,6 +302,14 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
         .flat_map(|(_, group)| world_defs(group))
         .collect();
 
+    // The base game's loot table, for maps without their own: Chernarus's, if it's there.
+    let base_loot = economies
+        .iter()
+        .filter(|(archive, e)| {
+            archive.mod_id.is_none() && e.files.contains_key("mapgroupproto.xml")
+        })
+        .max_by_key(|(_, e)| e.pbo.prefix.to_lowercase().contains("chernarusplus"))
+        .map(|(_, e)| e.clone());
     let mut worlds = Vec::new();
     let mut used_tiles = vec![false; tiles.len()];
     for def in &defs {
@@ -329,6 +344,7 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             world_size: def.size,
             places: def.places.clone(),
             satellite: tiles[i].1.clone(),
+            base_loot: economy.is_none().then(|| base_loot.clone()).flatten(),
             economy,
             terrain: Some(def.terrain.clone()),
             config: (!Arc::ptr_eq(&def.config, &def.terrain.pbo)).then(|| def.config.clone()),
@@ -359,6 +375,8 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             places: Vec::new(),
             satellite: source.clone(),
             economy: best_economy(&economies, &archive.mod_id, &anchor),
+            // Without a readable terrain there are no buildings to look up.
+            base_loot: None,
             terrain: None,
             config: None,
             scripts: Vec::new(),

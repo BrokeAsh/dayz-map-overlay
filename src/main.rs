@@ -387,6 +387,8 @@ fn list(config: &Config) -> Result<()> {
         let size = world.world_size.map_or("?".into(), |s| format!("{s:.0} m"));
         let economy = if world.economy.is_some() {
             "loot data"
+        } else if world.base_loot.is_some() {
+            "building loot"
         } else {
             "no loot data"
         };
