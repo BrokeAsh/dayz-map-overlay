@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - Your own markers: right-click the map to add a home, enemy or friendly base, stash, vehicle,
   danger, meeting point, the spot you died, or any kind of point of interest. A switch saves it
   for the server you're on (left) or for the map on every server (right). Right-click a marker
   to name it from a list, change its kind or where it's saved, or delete it; drag it to move it.
+- The Layers menu stays open while you tick its boxes.
 
 ## 0.2.1
 
