@@ -35,6 +35,11 @@ pub struct ViewConfig {
     pub show_places: bool,
     /// Point-of-interest layers the user turned on or off (by id); others use their defaults.
     pub layers: std::collections::BTreeMap<String, bool>,
+    /// Your markers saved for the server you're on, and for the whole map, shown.
+    pub show_server_markers: bool,
+    pub show_map_markers: bool,
+    /// New markers are saved for the whole map rather than the server (the switch when adding).
+    pub markers_for_map: bool,
 }
 
 impl Default for Config {
@@ -65,6 +70,9 @@ impl Default for ViewConfig {
             show_grid: true,
             show_places: true,
             layers: Default::default(),
+            show_server_markers: true,
+            show_map_markers: true,
+            markers_for_map: false,
         }
     }
 }

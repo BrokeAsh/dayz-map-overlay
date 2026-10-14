@@ -100,6 +100,7 @@ game's cursor is free over it:
 | Zoom | scroll wheel, double-click |
 | Reset view | **Fit** |
 | Points of interest | **Layers** |
+| Your own markers | right-click the map; drag one to move it |
 | Other maps | **Maps…** (the overlay switches back when you join a server) |
 | Close | **M**, the **×** button, or switching away from the game |
 
@@ -168,6 +169,25 @@ terrain itself, so it's complete, except on maps whose world file is encrypted (
 fall back to the wells listed in the economy files. Points of interest are rebuilt on their own
 (in well under a second) when the importer's version or the map's files change.
 
+## Your markers
+
+Right-click the map to put your own marker there: **Home**, **Enemy base**, **Friendly base**,
+**Stash**, **My vehicle**, **Danger**, **Meeting point**, **Where I died**, or under **Map
+features** any kind of point of interest the map has (water pump, military loot, heli crash,
+and so on).
+
+The switch at the top of that menu says where the marker belongs. To the left (**Server**), it's
+saved for the server you're on and only shows while you play there, ringed in gold. To the right
+(**Map**), it's saved for the map and shows on every server with that map, ringed in white. The
+switch stays where you leave it; it's on Map when you're not on a server (or are looking at
+another map than the one you're playing).
+
+There's no typing, so the game keeps the keyboard: markers are numbered by kind ("Enemy base 2").
+Right-click a marker to give it a name from a list (Main, Backup, Raided, Abandoned, North, ...),
+change its kind, move it between the server and the map, or delete it, and drag it to move it.
+**Layers** shows or hides each group. Markers are saved in `markers.json` in the data folder
+(next to `maps`), after every change.
+
 ## Settings
 
 `~/.config/dayz-map-overlay/config.toml` (on Windows,
@@ -189,6 +209,9 @@ map_opacity = 0.9
 backdrop_opacity = 0.35
 show_grid = true
 show_places = true
+show_server_markers = true   # your markers for the server you're on
+show_map_markers = true      # your markers for the whole map
+markers_for_map = false      # the Server/Map switch when adding a marker (false: Server)
 
 [view.layers]           # point-of-interest layers you switched on or off
 civilian = false

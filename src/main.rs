@@ -5,6 +5,7 @@ mod import;
 mod ipc;
 mod library;
 mod maps;
+mod markers;
 mod paths;
 mod steam;
 #[cfg(target_os = "linux")]

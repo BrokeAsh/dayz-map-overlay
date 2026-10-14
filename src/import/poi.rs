@@ -82,6 +82,29 @@ impl Kind {
         }
     }
 
+    /// What one marker of this kind is.
+    pub fn marker_label(self) -> &'static str {
+        match self {
+            Kind::Water => "Water pump",
+            Kind::FreshWater => "Fresh water",
+            Kind::Fuel => "Fuel station",
+            Kind::Military => "Military loot",
+            Kind::Police => "Police loot",
+            Kind::Medical => "Medical loot",
+            Kind::Firefighter => "Fire station",
+            Kind::Hunting => "Hunting loot",
+            Kind::Industrial => "Industrial loot",
+            Kind::Civilian => "Civilian loot",
+            Kind::HeliCrash => "Heli crash",
+            Kind::PoliceCar => "Police car wreck",
+            Kind::Convoy => "Military convoy",
+            Kind::Train => "Train wreck",
+            Kind::Vehicle => "Vehicle spawn",
+            Kind::Boat => "Boat spawn",
+            Kind::ToxicZone => "Toxic zone",
+        }
+    }
+
     pub fn id(self) -> String {
         format!("{self:?}").to_lowercase()
     }

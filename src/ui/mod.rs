@@ -3,6 +3,7 @@
 //! The map follows the game: when DayZ joins a server, the library imports that terrain if
 //! needed and the overlay switches to it. The maps list is only for browsing other maps.
 
+mod markers;
 mod tiles;
 
 use egui::{
@@ -19,6 +20,8 @@ use crate::game::Session;
 use crate::import::poi::{Kind, Pois};
 use crate::library::Library;
 use crate::maps::{self, LayerMeta, MapPack};
+use crate::markers::Markers;
+use markers::MenuTarget;
 use tiles::TileCache;
 
 /// Most zoomed-in view, in screen points per metre.
@@ -97,6 +100,14 @@ pub struct OverlayApp {
     picked_game_dir: Option<crossbeam_channel::Receiver<Option<PathBuf>>>,
     /// Feedback for the Maps window, such as a picked folder that isn't DayZ.
     notice: Option<String>,
+    /// Your own markers, on every map.
+    markers: Markers,
+    /// What the open right-click menu is about.
+    marker_menu: Option<MenuTarget>,
+    /// The marker being dragged, and where to (world x, z).
+    dragging: Option<(u64, f32, f32)>,
+    /// Why the markers couldn't be saved, if they couldn't.
+    marker_error: Option<String>,
 }
 
 impl OverlayApp {
@@ -122,6 +133,10 @@ impl OverlayApp {
             close_requested: false,
             picked_game_dir: None,
             notice: None,
+            markers: Markers::load(&crate::markers::default_path()),
+            marker_menu: None,
+            dragging: None,
+            marker_error: None,
         };
         app.reload_maps();
         app
@@ -216,6 +231,8 @@ impl OverlayApp {
     }
 
     pub fn on_hide(&mut self) {
+        // A drag cut short by closing doesn't carry over to the next one.
+        self.dragging = None;
         // Free GPU memory for the game; the overview levels reload instantly next time.
         self.tiles.trim(2);
         if let Err(e) = self.config.save_from_overlay(false) {
@@ -365,20 +382,60 @@ impl OverlayApp {
         let ctx = ui.ctx().clone();
         let pack = &self.maps[index];
         let world = pack.meta.world_size;
+        let map_id = pack.meta.id.clone();
         let Some(layer) = pack.meta.layers.first().cloned() else {
             return;
         };
         let fit = View::fit(world, screen);
-        let view = self.views.entry(pack.meta.id.clone()).or_insert(fit);
+        let mut view = *self.views.entry(map_id.clone()).or_insert(fit);
         let min_zoom = fit.zoom * 0.5;
 
-        // Panning and zooming.
+        // Panning and zooming; dragging one of your markers moves it instead.
         let response = ui.interact(screen, Id::new("map"), Sense::click_and_drag());
-        if response.dragged() {
-            let d = response.drag_delta();
-            view.center[0] -= f64::from(d.x) / view.zoom;
-            view.center[1] += f64::from(d.y) / view.zoom;
+        let on_screen = self.user_markers_on_screen(&map_id, &view, screen);
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
+            && let Some(id) = Self::user_marker_at(&on_screen, origin)
+            && let Some(marker) = self.markers.list.iter().find(|m| m.id == id)
+        {
+            self.dragging = Some((id, marker.x, marker.z));
         }
+        if response.dragged() {
+            match &mut self.dragging {
+                Some((_, x, z)) => {
+                    if let Some(p) = response.interact_pointer_pos() {
+                        let [wx, wz] = view.to_world(screen, p);
+                        (*x, *z) = (wx.clamp(0.0, world) as f32, wz.clamp(0.0, world) as f32);
+                    }
+                }
+                None => {
+                    let d = response.drag_delta();
+                    view.center[0] -= f64::from(d.x) / view.zoom;
+                    view.center[1] += f64::from(d.y) / view.zoom;
+                }
+            }
+        }
+        if response.drag_stopped()
+            && let Some((id, x, z)) = self.dragging.take()
+        {
+            let result = self.markers.edit(id, |m| (m.x, m.z) = (x, z));
+            self.saved(result);
+        }
+        if response.secondary_clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let [x, z] = view.to_world(screen, p);
+            let on_map = (0.0..=world).contains(&x) && (0.0..=world).contains(&z);
+            self.marker_menu = match Self::user_marker_at(&on_screen, p) {
+                Some(id) => Some(MenuTarget::Marker(id)),
+                None if on_map => Some(MenuTarget::Spot(x as f32, z as f32)),
+                None => None,
+            };
+        }
+        // Open until something in it is chosen: its Server/Map switch mustn't close it.
+        egui::Popup::context_menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.marker_menu(ui, &map_id));
         if response.double_clicked()
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -392,7 +449,7 @@ impl OverlayApp {
             }
         }
         view.center = view.center.map(|c| c.clamp(0.0, world));
-        let view = *view;
+        self.views.insert(map_id.clone(), view);
 
         let map_rect = Rect::from_two_pos(
             view.to_screen(screen, 0.0, world),
@@ -416,6 +473,15 @@ impl OverlayApp {
         let mut hovered: Option<(Pos2, String)> = None;
         if let Some(loaded) = self.current_pois() {
             hovered = self.paint_pois(&map_painter, &loaded.pois, &view, screen, hover);
+        }
+        // Yours on top, and before the map's under the pointer.
+        let on_screen = self.user_markers_on_screen(&map_id, &view, screen);
+        if let Some(yours) = self.paint_user_markers(&painter, &on_screen, hover) {
+            hovered = Some(yours);
+        }
+        // Not over an open menu (a marker's own, say).
+        if egui::Popup::is_any_open(&ctx) {
+            hovered = None;
         }
 
         if let Some(p) = hover {
@@ -655,7 +721,13 @@ impl OverlayApp {
                             }
                         }
                         ui.separator();
-                        ui.menu_button("Layers", |ui| self.layers_menu(ui, pois.as_deref()));
+                        // Open while its boxes are ticked, until a click elsewhere.
+                        egui::containers::menu::MenuButton::new("Layers")
+                            .config(
+                                egui::containers::menu::MenuConfig::new()
+                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                            )
+                            .ui(ui, |ui| self.layers_menu(ui, pois.as_deref()));
                         ui.label("Opacity");
                         ui.add(
                             egui::Slider::new(&mut self.config.view.map_opacity, 0.1..=1.0)
@@ -692,7 +764,7 @@ impl OverlayApp {
                             self.close_requested = true;
                         }
                     });
-                    if let Some(message) = &message {
+                    for message in [&message, &self.marker_error].into_iter().flatten() {
                         ui.colored_label(Color32::from_rgb(255, 170, 120), message);
                     }
                 });
@@ -701,6 +773,9 @@ impl OverlayApp {
 
     fn layers_menu(&mut self, ui: &mut egui::Ui, pois: Option<&LoadedPois>) {
         ui.set_min_width(230.0);
+        let map = self.current.map(|i| self.maps[i].meta.id.clone());
+        self.markers_layers(ui, map.as_deref());
+        ui.separator();
         let places = pois.map_or(0, |p| p.pois.places.len());
         ui.checkbox(
             &mut self.config.view.show_places,
