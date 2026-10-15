@@ -10,5 +10,5 @@ For each release, once it's published on GitHub:
 packaging/aur/update.sh 0.3.1     # version, checksums, .SRCINFO
 ```
 
-then copy `dayz-map-overlay-bin/PKGBUILD` and `.SRCINFO` into a clone of
+Commit the result here (the README's Arch Linux steps build from it), then copy `dayz-map-overlay-bin/PKGBUILD` and `.SRCINFO` into a clone of
 `ssh://aur@aur.archlinux.org/dayz-map-overlay-bin.git`, commit, and push.

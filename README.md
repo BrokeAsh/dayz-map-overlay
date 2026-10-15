@@ -89,6 +89,18 @@ dayz-map &               # or start it now
 `~/.local/bin` must be on your `PATH` for the short commands; the autostart entry uses the full
 path either way.
 
+On Arch Linux you can build and install the package instead (it'll be on the AUR once new
+accounts can sign up there again), which puts `dayz-map` in `/usr/bin`:
+
+```sh
+git clone https://github.com/BrokeAsh/dayz-map-overlay
+cd dayz-map-overlay/packaging/aur/dayz-map-overlay-bin
+makepkg -si
+dayz-map autostart on
+```
+
+To update, run `git pull` in that folder and `makepkg -si` again.
+
 To build it yourself, install Rust (1.95 or newer) and the Wayland and xkbcommon development packages
 (`libwayland-dev libxkbcommon-dev pkg-config` on Debian and Ubuntu), then run `cargo build --release`.
 
