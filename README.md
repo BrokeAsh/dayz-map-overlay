@@ -4,12 +4,17 @@ A see-through map that opens over DayZ when you press **M**, similar to the Stea
 It switches to the map of the server you're on by itself, building that map from the game's
 own files (or the server's Workshop mods) the first time, and marks points of interest:
 towns, water pumps, fuel, loot buildings by type, heli crash sites, vehicle spawns, and more.
+You can add your own markers too (home, enemy bases, stashes, ...), saved for the server or the
+map.
+
+> **Anti-cheat:** it never reads or changes the game's memory. It reads the game's files and
+> logs, draws its own window above the game like the Discord and Steam overlays, and hears the
+> hotkey like push-to-talk. See [Anti-cheat](#anti-cheat).
 
 It's written in Rust and runs on Windows 10 and 11, and on Linux desktops that support
-layer-shell overlays (KDE Plasma 6, Sway, Hyprland) with DayZ running through Steam/Proton. It
-doesn't read or change the game's memory: it reads the game's files and logs, draws its own
-window above the game, and listens for the hotkey like any other desktop app (see
-[Anti-cheat](#anti-cheat)).
+layer-shell overlays (KDE Plasma 6, Sway, Hyprland) with DayZ running through Steam/Proton.
+For a server browser with the overlay built in, see
+[DayZ Server Browser](https://github.com/BrokeAsh/dayz-server-browser).
 
 <p align="center">
   <img src="docs/screenshots/overview.jpg" width="49%" alt="Chernarus with the default layers">
@@ -65,8 +70,8 @@ start .\dayz-map.exe      # or start it now (double-clicking dayz-map.exe works 
 Started that way (or at sign-in), the overlay runs in the background without a window of its
 own and logs to `%APPDATA%\dayz-map-overlay\data\dayz-map.log`; `dayz-map quit` stops it.
 Started as plain `.\dayz-map`, it stays in that terminal and logs there instead, and closing the
-terminal stops it. The program isn't signed yet, so SmartScreen may
-warn the first time you run it.
+terminal stops it. The program isn't signed yet, so the first time you run it Windows may show
+"Windows protected your PC": click **More info**, then **Run anyway**.
 
 ### Linux
 

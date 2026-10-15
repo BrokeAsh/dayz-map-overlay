@@ -1,0 +1,24 @@
+# Maintainer: BrokeAsh <158607416+BrokeAsh@users.noreply.github.com>
+
+pkgname=dayz-map-overlay-bin
+_name=dayz-map
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="See-through DayZ map that opens over the game and follows the server you're on"
+arch=('x86_64')
+url="https://github.com/BrokeAsh/dayz-map-overlay"
+license=('MIT' 'Apache-2.0')
+# A Wayland layer-shell window drawn through EGL (KDE Plasma 6, Sway, Hyprland).
+depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'wayland')
+provides=('dayz-map-overlay')
+conflicts=('dayz-map-overlay')
+options=('!strip' '!debug')
+source=("$url/releases/download/v$pkgver/$_name-v$pkgver-linux-x86_64.tar.gz")
+sha256sums=('d1af5a31c7179c73f38a5c093bcfef9304f63bc401e33c6b10eef169864d8e0c')
+
+package() {
+  cd "$_name-v$pkgver-linux-x86_64"
+  install -Dm755 -t "$pkgdir/usr/bin" dayz-map
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md CHANGELOG.md
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE
+}
