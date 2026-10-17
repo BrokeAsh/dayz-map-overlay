@@ -1,6 +1,6 @@
 pkgbase = dayz-map-overlay-bin
 	pkgdesc = See-through DayZ map that opens over the game and follows the server you're on
-	pkgver = 0.3.0
+	pkgver = 0.3.1
 	pkgrel = 1
 	url = https://github.com/BrokeAsh/dayz-map-overlay
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = dayz-map-overlay-bin
 	conflicts = dayz-map-overlay
 	options = !strip
 	options = !debug
-	source = https://github.com/BrokeAsh/dayz-map-overlay/releases/download/v0.3.0/dayz-map-v0.3.0-linux-x86_64.tar.gz
-	sha256sums = d1af5a31c7179c73f38a5c093bcfef9304f63bc401e33c6b10eef169864d8e0c
+	source = https://github.com/BrokeAsh/dayz-map-overlay/releases/download/v0.3.1/dayz-map-v0.3.1-linux-x86_64.tar.gz
+	sha256sums = ab531209ba6fc33bb56ca4460855254a6ef02c1e5d8559805371eeb6fc6dbb9b
 
 pkgname = dayz-map-overlay-bin
