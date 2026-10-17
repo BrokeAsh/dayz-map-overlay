@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Windows: the map is the active window while it's open, so DayZ lets go of the mouse. Before,
-  the game kept the cursor in the middle of the screen, and moving or clicking on the map also
-  turned your view and fired. Closing the map (M, the × button, Alt+F4, or Alt+Tab back to the
-  game) makes the game active again. Keys go to the map while it's open, and the mouse wheel
-  zooms without Windows' "Scroll inactive windows" setting.
+- Windows: click the map to use the mouse on it. While DayZ is the active window it keeps the
+  mouse, holding the cursor in the middle of the screen and turning your view. The map still opens
+  without taking focus, so you keep moving and the wheel zooms; a click makes it the active window
+  (that click does nothing else), and then you can pan, drag, and place markers while keys wait.
+  Alt+Tab back to the game leaves the map open; closing it puts you back in the game. Linux is
+  unchanged.
 
 ## 0.3.0
 

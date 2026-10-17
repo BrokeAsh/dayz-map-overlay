@@ -107,11 +107,11 @@ To build it yourself, install Rust (1.95 or newer) and the Wayland and xkbcommon
 ## Use
 
 Join a server and press **M**. The first time you join a map it takes a couple of seconds
-(during the loading screen) to build it. The game keeps running underneath. On Linux it also
-keeps focus, like the Steam overlay, so the keyboard still goes to DayZ and the map takes the
-mouse whenever the cursor is over it. On Windows the map is the active window while it's open,
-because otherwise DayZ keeps the mouse (holding the cursor in the middle and turning your view);
-keys go to the map until you close it, which puts you straight back in the game:
+(during the loading screen) to build it. Like the Steam overlay, the game stays focused and keeps
+running underneath, so the keyboard still goes to DayZ. The map takes the mouse whenever the
+game's cursor is free over it. On Windows, DayZ keeps the mouse while it's the active window (the
+wheel still zooms the map), so click the map to give it the mouse; until you close it or Alt+Tab
+back to the game, keys wait. That click only makes the map active, but DayZ sees it too:
 
 | Action | How |
 | --- | --- |
@@ -121,7 +121,7 @@ keys go to the map until you close it, which puts you straight back in the game:
 | Points of interest | **Layers** |
 | Your own markers | right-click the map; drag one to move it |
 | Other maps | **Maps…** (the overlay switches back when you join a server) |
-| Close | **M**, the **×** button, or switching away from the game (on Windows, also Alt+Tab back to it) |
+| Close | **M**, the **×** button, or switching away from the game |
 
 The toolbar shows the map, the server's name and player count (with its queue, if there is
 one; updated every 30 seconds), and sliders for map opacity and how much the
@@ -255,6 +255,10 @@ from the game's library (or from the game's `!Workshop` links), so `log_dir` is 
   then can't tell when you switch away from the game, so close it with the same key. If it logs
   `hotkey ignored: DayZ itself isn't running`, check that `dayz-map status` shows the game
   running (M does nothing in the launcher on purpose).
+- **Scrolling doesn't zoom (Windows):** turn on "Scroll inactive windows when I hover over
+  them" in Settings > Bluetooth & devices > Mouse (Windows 10: Settings > Devices > Mouse; on by
+  default). Until you click it, the map isn't the active window, so Windows only sends it the
+  wheel with that setting.
 - **The map doesn't follow the server:** `dayz-map status` should show a Logs folder and, while
   you're on a server, the map and server name.
 - **A map is missing:** `dayz-map list` shows every terrain found; Rescan in the Maps window
@@ -298,14 +302,15 @@ loot. Some community servers ban third-party tools in their rules, so check your
   keeps running; clicks on it don't activate it either. Its namespace is `on-screen-display`,
   which KWin treats like the volume OSD: it fades in and out rather than animating like a window.
   Rendering is egui on wgpu (Vulkan).
-- **Windows** (`src/host/windows.rs`): a topmost tool window covering the game's monitor, drawn
-  with DirectX 12 through DirectComposition so it can be see-through. Windows sends all mouse
-  input to the active window, and an active DayZ hides the cursor, keeps it in the middle of the
-  screen and turns the camera with it, so the overlay makes itself the active window when it
-  opens and gives focus back to the game when it closes (clicks never activate it,
-  `WS_EX_NOACTIVATE`). The hotkey comes from raw keyboard input, which Windows delivers to
-  background windows without a hook, and the overlay hides when another window comes to the
-  front, the game included.
+- **Windows** (`src/host/windows.rs`): a topmost, non-activating tool window
+  (`WS_EX_NOACTIVATE`) covering the game's monitor, drawn with DirectX 12 through DirectComposition
+  so it can be see-through. It opens without taking focus, so DayZ stays the foreground window.
+  Windows sends the active window all mouse input (as raw input, which no hook outside the game
+  can hold back), and an active DayZ hides the cursor and keeps it in the middle of the screen,
+  so the first click on the map makes the overlay the active window and is otherwise dropped;
+  closing the map gives focus back to the game. The hotkey comes from raw keyboard input, which
+  Windows delivers to background windows without a hook, and the overlay hides when another
+  window comes to the front.
 - **Hotkey on Linux** (`src/trigger/`): Proton games draw through XWayland, which only receives keyboard
   input while one of its windows is focused. The app listens for raw XInput2 key events from
   XWayland and checks the focused window against `window_match`: no key grab, no root access, and
