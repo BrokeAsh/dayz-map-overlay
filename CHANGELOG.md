@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows: the map is the active window while it's open, so DayZ lets go of the mouse. Before,
+  the game kept the cursor in the middle of the screen, and moving or clicking on the map also
+  turned your view and fired. Closing the map (M, the × button, Alt+F4, or Alt+Tab back to the
+  game) makes the game active again. Keys go to the map while it's open, and the mouse wheel
+  zooms without Windows' "Scroll inactive windows" setting.
+
 ## 0.3.0
 
 - Your own markers: right-click the map to add a home, enemy or friendly base, stash, vehicle,

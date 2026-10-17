@@ -14,11 +14,15 @@ use windows_sys::Win32::System::Registry::{
     HKEY, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+    ClipCursor, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+    SetForegroundWindow,
 };
 
 pub use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
@@ -164,6 +168,58 @@ pub fn stop_background_mouse() {
 pub fn foreground_window() -> HWND {
     // SAFETY: a plain query.
     unsafe { GetForegroundWindow() }
+}
+
+/// Makes `hwnd` the active window, so the game in front lets go of the mouse; returns whether it
+/// worked. Windows lets a program that isn't in front do this only right after it sent input, so
+/// if a plain request is refused this sends a mouse move of zero (which moves nothing) and asks
+/// again, then as a last resort asks while sharing the front window's input state.
+pub fn bring_to_front(hwnd: HWND) -> bool {
+    // SAFETY: plain window calls; the one INPUT is fully set and its size given; the input
+    // attachment is undone straight away.
+    unsafe {
+        if GetForegroundWindow() == hwnd {
+            return true;
+        }
+        if SetForegroundWindow(hwnd) != 0 && GetForegroundWindow() == hwnd {
+            return true;
+        }
+        let nudge = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        SendInput(1, &nudge, size_of::<INPUT>() as i32);
+        if SetForegroundWindow(hwnd) != 0 && GetForegroundWindow() == hwnd {
+            log::debug!("brought a window to the front after a mouse nudge");
+            return true;
+        }
+        let front = GetForegroundWindow();
+        let theirs = GetWindowThreadProcessId(front, std::ptr::null_mut());
+        let ours = GetCurrentThreadId();
+        if theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, 1) != 0 {
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(ours, theirs, 0);
+        }
+        let done = GetForegroundWindow() == hwnd;
+        log::debug!("brought a window to the front by sharing input: {done}");
+        done
+    }
+}
+
+/// Lets the cursor go anywhere again, in case the game confined it to its window and didn't let
+/// go when it lost focus.
+pub fn free_cursor() {
+    // SAFETY: a null rectangle removes the confinement.
+    unsafe { ClipCursor(std::ptr::null()) };
 }
 
 /// Whether `hwnd` still names a window (the game may have closed since it was seen).

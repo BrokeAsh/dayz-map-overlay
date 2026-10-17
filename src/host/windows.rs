@@ -1,11 +1,15 @@
 //! Shows the overlay as a borderless, always-on-top, see-through window on Windows.
 //!
-//! The window never takes focus (`WS_EX_NOACTIVATE`), so DayZ stays the active window and keeps
-//! running, like the Steam overlay. It draws through a DirectComposition swapchain, which is what
-//! lets DX12 output be transparent. The hotkey comes from raw keyboard input, which Windows
-//! delivers to background windows too (`RIDEV_INPUTSINK`, through winit's device events); the
-//! press still reaches the game. DayZ must run in windowed or borderless mode: nothing can draw
-//! over an exclusive-fullscreen game without hooking into it.
+//! While the map is open the overlay is the active window. The game keeps running underneath,
+//! but Windows sends all mouse input to the active window: while DayZ is active it hides the
+//! cursor, keeps putting it back in the middle, and turns the camera and fires with the mouse,
+//! wherever the cursor is. Closing the map makes the game the active window again. Clicks never
+//! activate the window (`WS_EX_NOACTIVATE`); it takes focus only when shown. It draws through a
+//! DirectComposition swapchain, which is what lets DX12 output be transparent. The hotkey comes
+//! from raw keyboard input, which Windows delivers to background windows too (`RIDEV_INPUTSINK`,
+//! through winit's device events), so it works whichever window is active. DayZ must run in
+//! windowed or borderless mode: nothing can draw over an exclusive-fullscreen game without
+//! hooking into it.
 
 use anyhow::{Context, Result};
 use egui_wgpu::wgpu;
@@ -108,6 +112,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         hotkey_seen: None,
         visible: false,
         follow_focus: false,
+        took_focus: false,
+        return_to: None,
         game: None,
         next_repaint: None,
         next_focus_check: Instant::now(),
@@ -149,6 +155,10 @@ struct Host {
     visible: bool,
     /// Close when the game stops being the front window (set when opened over the game).
     follow_focus: bool,
+    /// Whether showing made the overlay the active window (so the game let go of the mouse).
+    took_focus: bool,
+    /// The window that was in front when the map opened, to make active again when it closes.
+    return_to: Option<HWND>,
     /// The game window the hotkey was pressed in, to open on its monitor.
     game: Option<HWND>,
     next_repaint: Option<Instant>,
@@ -259,6 +269,15 @@ impl Host {
                 );
             }
         }
+        // Take focus from the game, so it lets go of the mouse.
+        let before = win::foreground_window();
+        self.return_to = (!before.is_null() && before != overlay.hwnd).then_some(before);
+        self.took_focus = win::bring_to_front(overlay.hwnd);
+        if self.took_focus {
+            win::free_cursor();
+        } else {
+            log::warn!("couldn't make the map the active window; the game may keep the mouse");
+        }
         self.visible = true;
         self.follow_focus = follow_focus;
         self.next_focus_check = Instant::now() + FOCUS_CHECK;
@@ -273,6 +292,14 @@ impl Host {
             return;
         }
         if let Some(overlay) = &mut self.window {
+            // Give the game its focus back while we still can (being in front), rather than
+            // leave Windows to pick the next window.
+            if win::foreground_window() == overlay.hwnd
+                && let Some(before) = self.return_to.filter(|&hwnd| win::is_window(hwnd))
+                && !win::bring_to_front(before)
+            {
+                log::warn!("couldn't make the window behind the map active again");
+            }
             // SAFETY: hiding our own window.
             unsafe { ShowWindow(overlay.hwnd, SW_HIDE) };
             overlay
@@ -282,6 +309,8 @@ impl Host {
                 .extend(super::release_pointer());
         }
         self.visible = false;
+        self.took_focus = false;
+        self.return_to = None;
         self.last_hide = Instant::now();
         self.app.on_hide();
         self.gpu.release_textures(&self.egui_ctx);
@@ -333,7 +362,7 @@ impl Host {
             return;
         };
         if front.ours {
-            // Clicking the map doesn't activate it, but a dialog of ours might be in front.
+            // The open map (or a dialog of ours) is the active window.
             self.hide();
             return;
         }
@@ -478,8 +507,8 @@ impl ApplicationHandler<HostEvent> for Host {
                     Err(e) => log::error!("{e:#}"),
                 }
             }
-            // Not closable from the taskbar (it isn't on it) or Alt+F4 (it never has focus).
-            WindowEvent::CloseRequested => {}
+            // Alt+F4 while the map is open closes the map, not the program.
+            WindowEvent::CloseRequested => self.hide(),
             _ if response.repaint => overlay.window.request_redraw(),
             _ => {}
         }
@@ -500,12 +529,18 @@ impl ApplicationHandler<HostEvent> for Host {
         if self.visible && self.follow_focus && self.next_focus_check <= now {
             self.next_focus_check = now + FOCUS_CHECK;
             // The map belongs to the game; don't leave it over whatever the user switched to.
-            // (Checking the window handle first skips the process lookup in the usual case.)
-            if self.game != Some(win::foreground_window())
-                && let Some(front) = win::foreground()
-                && !front.ours
-                && !self.matches_game(&front)
-            {
+            // Switching back to the game (Alt+Tab) closes it too, once it had taken focus: the
+            // game has the mouse again. (Checking the window handle first skips the process
+            // lookup in the usual case.)
+            let front_hwnd = win::foreground_window();
+            let back_in_game = self.took_focus && self.game == Some(front_hwnd);
+            let elsewhere = || {
+                let ours = self.window.as_ref().map(|w| w.hwnd) == Some(front_hwnd);
+                !ours
+                    && self.game != Some(front_hwnd)
+                    && win::foreground().is_some_and(|f| !f.ours && !self.matches_game(&f))
+            };
+            if back_in_game || elsewhere() {
                 self.hide();
             }
         }
