@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Windows: click the map to use the mouse on it. While DayZ is the active window it keeps the
   mouse, holding the cursor in the middle of the screen and turning your view. The map still opens
