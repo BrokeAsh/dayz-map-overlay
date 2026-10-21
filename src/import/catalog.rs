@@ -462,15 +462,15 @@ fn link_score(
         .then_some(usize::from(same_mod) * 100 + usize::from(same_origin) * 50 + shared)
 }
 
-/// The base game's economy, when a map's own lacks the item list or the building loot.
+/// The base game's economy, for the item list or building loot a map lacks (some ship an empty
+/// item list), unless it's the map's own.
 fn base_economy(
     own: &Option<EconomySource>,
     base: &Option<EconomySource>,
 ) -> Option<EconomySource> {
-    let complete = own.as_ref().is_some_and(|e| {
-        e.files.contains_key("types.xml") && e.files.contains_key("mapgroupproto.xml")
-    });
-    (!complete).then(|| base.clone()).flatten()
+    let same = |a: &EconomySource, b: &EconomySource| Arc::ptr_eq(&a.pbo, &b.pbo);
+    base.clone()
+        .filter(|b| !own.as_ref().is_some_and(|o| same(o, b)))
 }
 
 fn best_economy(

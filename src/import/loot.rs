@@ -481,8 +481,18 @@ pub fn build(
             .or_else(|| base.and_then(|b| b.get(name)))
             .map(|d| String::from_utf8_lossy(d).into_owned())
     };
-    let types_text = text("types.xml")?;
     let proto_text = text("mapgroupproto.xml")?;
+    // Some maps ship a placeholder item list (Namalsk's is empty): then the base game's.
+    let spawnable = |entries: Vec<TypeEntry>| {
+        let entries: Vec<TypeEntry> = entries.into_iter().filter(|t| t.nominal > 0).collect();
+        (!entries.is_empty()).then_some(entries)
+    };
+    let read = |files: &HashMap<String, Vec<u8>>| {
+        files
+            .get("types.xml")
+            .and_then(|d| spawnable(types(&String::from_utf8_lossy(d))))
+    };
+    let entries = read(files).or_else(|| base.and_then(read))?;
     let [usage_names, tier_names, category_names, tag_names] = limits(
         files
             .get("cfglimitsdefinition.xml")
@@ -507,9 +517,8 @@ pub fn build(
         .map(|(i, p)| (p.name.as_str(), i as u32))
         .collect();
 
-    let mut items: Vec<Item> = types(&types_text)
+    let mut items: Vec<Item> = entries
         .into_iter()
-        .filter(|t| t.nominal > 0)
         .map(|t| {
             let lower_usages: Vec<String> =
                 t.usages.iter().map(|u| u.to_ascii_lowercase()).collect();
@@ -698,6 +707,18 @@ mod tests {
         let zoned = loot(&[zone]);
         assert_eq!(zoned.capacity(&zoned.buildings[1], &[svd(&zoned)]), 2);
         assert_eq!(zoned.capacity(&zoned.buildings[0], &[svd(&zoned)]), 0);
+    }
+
+    #[test]
+    fn empty_item_lists_fall_back_to_the_base_game() {
+        let files = HashMap::from([
+            ("types.xml".to_string(), b"<types>\n</types>".to_vec()),
+            ("mapgroupproto.xml".to_string(), PROTO.as_bytes().to_vec()),
+        ]);
+        let base = HashMap::from([("types.xml".to_string(), TYPES.as_bytes().to_vec())]);
+        let placed = [("land_house".to_string(), 1.0, 1.0)];
+        let loot = build(&files, Some(&base), &placed, &[], &ItemConfigs::default()).unwrap();
+        assert!(loot.items.iter().any(|i| i.class == "Mosin9130"));
     }
 
     #[test]
