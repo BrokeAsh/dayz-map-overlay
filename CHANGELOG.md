@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - Place names on Sakhal (60) and Nasdara (156). Their world files are encrypted, so the overlay
   now carries a copy of the names the game itself loads. Existing imports pick them up on their
