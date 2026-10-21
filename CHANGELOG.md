@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Find where items spawn: **Items…** lists everything the map's loot can spawn, by kind (guns,
   ammo, food, drinks, medical, clothing, backpacks, ...). Tick a kind or single items and the map
