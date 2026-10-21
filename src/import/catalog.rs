@@ -22,7 +22,7 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 5;
+pub const POI_VERSION: u32 = 6;
 
 const ECONOMY_FILES: [&str; 4] = [
     "mapgrouppos.xml",
@@ -351,8 +351,9 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             scripts: world_scripts,
         });
     }
-    // Tiles with no readable world config (Sakhal's world file is encrypted): name the world
-    // after the archive prefix instead.
+    // Tiles with no readable world config (Sakhal's and Nasdara's world files are encrypted):
+    // name the world after the archive prefix instead, and take the game's place names from
+    // the copy kept with the importer.
     for (i, (archive, source)) in tiles.iter().enumerate() {
         if used_tiles[i] {
             continue;
@@ -366,13 +367,17 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             continue;
         }
         let anchor = source.pbo.prefix.to_lowercase();
+        let places = match archive.mod_id {
+            None => poi::builtin_places(&id),
+            Some(_) => Vec::new(),
+        };
         worlds.push(WorldSource {
             name: maps::display_name(&id),
             id,
             mod_name: archive.mod_dir.as_deref().and_then(mod_name),
             mod_id: archive.mod_id.clone(),
             world_size: None,
-            places: Vec::new(),
+            places,
             satellite: source.clone(),
             economy: best_economy(&economies, &archive.mod_id, &anchor),
             // Without a readable terrain there are no buildings to look up.

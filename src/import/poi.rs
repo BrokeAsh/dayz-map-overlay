@@ -1,6 +1,7 @@
 //! Points of interest from a terrain's own files.
 //!
-//! - Place names come from the world config (`CfgWorlds >> <world> >> Names`).
+//! - Place names come from the world config (`CfgWorlds >> <world> >> Names`). The game's
+//!   encrypted worlds (Sakhal, Nasdara) use a copy of theirs kept in `places/`.
 //! - Buildings come from the Central Economy files most maps ship for their default mission:
 //!   `mapgrouppos.xml` places each lootable building, and `mapgroupproto.xml` says what kind of
 //!   loot it spawns (through `usage` or `tag` entries). A map without them (its servers have
@@ -170,32 +171,67 @@ pub fn places(world: &rap::Class) -> Vec<Place> {
     names
         .classes()
         .filter_map(|(_, place)| {
-            let name = transliterate(place.value("name")?.as_str()?.trim());
             let position = place.value("position")?.as_array()?;
-            let (x, z) = (position.first()?.as_f32()?, position.get(1)?.as_f32()?);
-            let kind = place
-                .value("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string();
-            // Skip unnamed or localisation-only entries, and decorative types.
-            let skip = name.is_empty() || name.starts_with('$') || name.starts_with('#');
-            let decorative = matches!(
-                kind.to_ascii_lowercase().as_str(),
-                "viewpoint"
-                    | "rockarea"
-                    | "flatarea"
-                    | "flatareacity"
-                    | "flatareacitysmall"
-                    | "bordercrossing"
-                    | "vegetationbroadleaf"
-                    | "vegetationfir"
-                    | "vegetationpalm"
-                    | "vegetationvineyard"
-            );
-            (!skip && !decorative).then_some(Place { name, kind, x, z })
+            let kind = place.value("type").and_then(|t| t.as_str()).unwrap_or("");
+            named_place(
+                place.value("name")?.as_str()?,
+                kind,
+                position.first()?.as_f32()?,
+                position.get(1)?.as_f32()?,
+            )
         })
         .collect()
+}
+
+/// A config entry as a place, unless it's unnamed, localisation-only, or decorative.
+fn named_place(name: &str, kind: &str, x: f32, z: f32) -> Option<Place> {
+    let name = transliterate(name.trim());
+    let skip = name.is_empty() || name.starts_with('$') || name.starts_with('#');
+    let decorative = matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "viewpoint"
+            | "rockarea"
+            | "flatarea"
+            | "flatareacity"
+            | "flatareacitysmall"
+            | "bordercrossing"
+            | "vegetationbroadleaf"
+            | "vegetationfir"
+            | "vegetationpalm"
+            | "vegetationvineyard"
+    );
+    (!skip && !decorative).then(|| Place {
+        name,
+        kind: kind.to_string(),
+        x,
+        z,
+    })
+}
+
+/// Place names for the game's own worlds whose config is encrypted (Sakhal, Nasdara): the
+/// `Names` entries the game loads, copied out with `tools/place-names`.
+pub fn builtin_places(world: &str) -> Vec<Place> {
+    #[derive(Deserialize)]
+    struct Entry {
+        name: String,
+        #[serde(rename = "type")]
+        kind: String,
+        x: f32,
+        z: f32,
+    }
+    let json = match world {
+        "sakhal" => include_str!("places/sakhal.json"),
+        "nasdara" => include_str!("places/nasdara.json"),
+        _ => return Vec::new(),
+    };
+    serde_json::from_str::<Vec<Entry>>(json)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| named_place(&e.name, &e.kind, e.x, e.z))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Markers and zones from the Central Economy files (keyed by lower-case file name).
@@ -602,6 +638,26 @@ mod tests {
         assert_eq!(transliterate("Черногорск"), "Chernogorsk");
         assert_eq!(transliterate("Электрозаводск"), "Elektrozavodsk");
         assert_eq!(transliterate("Bielawa"), "Bielawa");
+    }
+
+    #[test]
+    fn builtin_places_for_encrypted_worlds() {
+        let sakhal = builtin_places("sakhal");
+        assert_eq!(sakhal.len(), 60);
+        assert_eq!(sakhal[0].name, "Petropavlovsk-Sakhalskiy");
+        assert_eq!(sakhal[0].kind, "Capital");
+        // Some names mix in Latin look-alikes (the `u` here).
+        assert!(sakhal.iter().any(|p| p.name == "Urup"));
+        let nasdara = builtin_places("nasdara");
+        assert_eq!(nasdara.len(), 156);
+        assert!(
+            nasdara
+                .iter()
+                .any(|p| p.name == "Nasdara" && p.kind == "Capital")
+        );
+        let on_map = |p: &Place| (0.0..16384.0).contains(&p.x) && (0.0..16384.0).contains(&p.z);
+        assert!(sakhal.iter().chain(&nasdara).all(on_map));
+        assert!(builtin_places("chernarusplus").is_empty());
     }
 
     #[test]

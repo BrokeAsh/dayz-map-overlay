@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Place names on Sakhal (60) and Nasdara (156). Their world files are encrypted, so the overlay
+  now carries a copy of the names the game itself loads. Existing imports pick them up on their
+  own.
+
 ## 0.3.1
 
 - Windows: click the map to use the mouse on it. While DayZ is the active window it keeps the

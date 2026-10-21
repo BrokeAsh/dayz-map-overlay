@@ -172,7 +172,7 @@ dayz-map import-image mymap mymap.png --world-size 12800 --name "My Map"
 
 | Layer | Source |
 | --- | --- |
-| Place names | `CfgWorlds >> <world> >> Names` (Chernarus's Cyrillic names are transliterated) |
+| Place names | `CfgWorlds >> <world> >> Names` (Chernarus's and Sakhal's Cyrillic names are transliterated); Sakhal and Nasdara encrypt theirs, so the overlay ships a copy taken from the game (see `tools/place-names`) |
 | Water pumps and wells (blue, tap icon) | the terrain's `.wrp`: every building whose class the game's or the map mod's scripts make a `Well` (pumps, plus mod additions such as Namalsk's lab sinks) |
 | Fresh water (blue, wave icon) | the terrain's `.wrp`: pond, lake, river, stream and spring objects, one marker per area (about 400 m) |
 | Fuel stations | buildings in `mapgrouppos.xml` |
@@ -184,7 +184,7 @@ These are each map's defaults; a server can change its loot and events. On a map
 own economy files, buildings show what they spawn in the base game, buildings the mod made
 itself are missing, and there are no event spawns or zones (`dayz-map list` says "building
 loot" for these). On Chernarus this way finds exactly the buildings its own files list. Water comes from the
-terrain itself, so it's complete, except on maps whose world file is encrypted (Sakhal), which
+terrain itself, so it's complete, except on maps whose world file is encrypted (Sakhal, Nasdara), which
 fall back to the wells listed in the economy files. Points of interest are rebuilt on their own
 (in well under a second) when the importer's version or the map's files change.
 
