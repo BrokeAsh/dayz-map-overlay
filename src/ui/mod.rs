@@ -3,6 +3,7 @@
 //! The map follows the game: when DayZ joins a server, the library imports that terrain if
 //! needed and the overlay switches to it. The maps list is only for browsing other maps.
 
+mod items;
 mod markers;
 mod tiles;
 
@@ -10,13 +11,14 @@ use egui::{
     Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::game::Session;
+use crate::import::items::Group;
 use crate::import::poi::{Kind, Pois};
 use crate::library::Library;
 use crate::maps::{self, LayerMeta, MapPack};
@@ -75,6 +77,8 @@ impl View {
 struct LoadedPois {
     pois: Pois,
     counts: HashMap<Kind, usize>,
+    /// The Items panel's list.
+    rows: Vec<items::ItemRow>,
 }
 
 pub struct OverlayApp {
@@ -108,6 +112,11 @@ pub struct OverlayApp {
     dragging: Option<(u64, f32, f32)>,
     /// Why the markers couldn't be saved, if they couldn't.
     marker_error: Option<String>,
+    items_open: bool,
+    item_search: String,
+    items_expanded: HashSet<Group>,
+    /// The picked items' buildings on the shown map.
+    item_matches: Option<items::Matches>,
 }
 
 impl OverlayApp {
@@ -137,6 +146,10 @@ impl OverlayApp {
             marker_menu: None,
             dragging: None,
             marker_error: None,
+            items_open: false,
+            item_search: String::new(),
+            items_expanded: HashSet::new(),
+            item_matches: None,
         };
         app.reload_maps();
         app
@@ -269,6 +282,10 @@ impl OverlayApp {
             self.map_view(ui, index, screen);
         }
         self.toolbar(&ctx);
+        if self.items_open {
+            let pois = self.current_pois();
+            self.items_window(&ctx, pois.as_deref());
+        }
         if self.maps_window_shown() {
             self.maps_window(&ctx);
         }
@@ -364,7 +381,8 @@ impl OverlayApp {
                 *counts.entry(m.kind).or_default() += 1;
             }
             *counts.entry(Kind::ToxicZone).or_default() += pois.zones.len();
-            Arc::new(LoadedPois { pois, counts })
+            let rows = pois.loot.as_ref().map(items::rows).unwrap_or_default();
+            Arc::new(LoadedPois { pois, counts, rows })
         });
         Some(loaded.clone())
     }
@@ -472,7 +490,15 @@ impl OverlayApp {
         let hover = response.hover_pos();
         let mut hovered: Option<(Pos2, String)> = None;
         if let Some(loaded) = self.current_pois() {
-            hovered = self.paint_pois(&map_painter, &loaded.pois, &view, screen, hover);
+            self.update_item_matches(&map_id, &loaded);
+            let items = self.showing_items(&loaded);
+            hovered = self.paint_pois(&map_painter, &loaded.pois, &view, screen, hover, items);
+            if items
+                && let Some(spot) =
+                    self.paint_item_spots(&map_painter, &loaded, &view, screen, hover)
+            {
+                hovered = Some(spot);
+            }
         }
         // Yours on top, and before the map's under the pointer.
         let on_screen = self.user_markers_on_screen(&map_id, &view, screen);
@@ -572,6 +598,7 @@ impl OverlayApp {
     }
 
     /// Draws zones, markers, and place names; returns the marker under the pointer, if any.
+    /// While items are shown, their spots replace the loot-building layers.
     fn paint_pois(
         &self,
         painter: &egui::Painter,
@@ -579,6 +606,7 @@ impl OverlayApp {
         view: &View,
         screen: Rect,
         hover: Option<Pos2>,
+        items: bool,
     ) -> Option<(Pos2, String)> {
         let visible = screen.expand(20.0);
         let mut nearest: Option<(f32, Pos2, String)> = None;
@@ -624,7 +652,7 @@ impl OverlayApp {
         let mut kinds = Kind::ALL;
         kinds.sort_by_key(|&k| water_icon(k).is_some());
         for kind in kinds {
-            if !self.layer_shown(kind) {
+            if !self.layer_shown(kind) || (items && is_loot_building(kind)) {
                 continue;
             }
             let color = kind_color(kind);
@@ -728,6 +756,9 @@ impl OverlayApp {
                                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
                             )
                             .ui(ui, |ui| self.layers_menu(ui, pois.as_deref()));
+                        if ui.selectable_label(self.items_open, "Items…").clicked() {
+                            self.items_open = !self.items_open;
+                        }
                         ui.label("Opacity");
                         ui.add(
                             egui::Slider::new(&mut self.config.view.map_opacity, 0.1..=1.0)
@@ -811,6 +842,13 @@ impl OverlayApp {
         }
         if !any {
             ui.label(egui::RichText::new("This map has no point-of-interest data.").weak());
+        }
+        if pois.is_some_and(|p| self.showing_items(p)) {
+            ui.label(
+                egui::RichText::new("Loot buildings are hidden while items are picked.")
+                    .weak()
+                    .small(),
+            );
         }
         ui.separator();
         ui.label(
@@ -925,6 +963,20 @@ impl OverlayApp {
             self.library.import(&id);
         }
     }
+}
+
+/// The layers of buildings by the loot they hold, which the Items panel's spots stand in for.
+fn is_loot_building(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Military
+            | Kind::Police
+            | Kind::Medical
+            | Kind::Firefighter
+            | Kind::Hunting
+            | Kind::Industrial
+            | Kind::Civilian
+    )
 }
 
 fn is_event(kind: Kind) -> bool {

@@ -5,7 +5,9 @@
 //! overlay can stream at any zoom level, and extracts points of interest.
 
 pub mod catalog;
+pub mod items;
 pub mod layout;
+pub mod loot;
 mod lzo;
 mod lzss;
 pub mod paa;
@@ -169,20 +171,26 @@ fn write_pois(dir: &Path, generation: &str, json: &[u8]) -> Result<(String, Remo
 
 /// The world's points of interest, as `pois.json` holds them.
 fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
-    let (mut markers, zones) = source
+    let own = source
         .economy
         .as_ref()
-        .map(|e| e.read_all().map(|files| poi::from_economy(&files)))
+        .map(|e| e.read_all())
         .transpose()
         .context("reading the economy files")?
         .unwrap_or_default();
+    let (mut markers, zones) = poi::from_economy(&own);
+    let base = source
+        .base_economy
+        .as_ref()
+        .map(|e| e.read_some(|name| matches!(name, "types.xml" | "mapgroupproto.xml")))
+        .transpose()
+        .context("reading the base game's economy files")?;
     let base_loot = source
         .base_loot
-        .as_ref()
-        .map(|e| e.read_all().map(|files| poi::loot_table(&files)))
-        .transpose()
-        .context("reading the base game's loot table")?;
-    let water = terrain_markers(source, base_loot.as_ref())?;
+        .is_some()
+        .then(|| base.as_ref().map(poi::loot_table))
+        .flatten();
+    let (water, terrain_buildings) = terrain_markers(source, base_loot.as_ref())?;
     if water.iter().any(|m| m.kind == poi::Kind::Water) {
         // The terrain lists every well; the economy only the ones that spawn loot.
         markers.retain(|m| m.kind != poi::Kind::Water);
@@ -197,7 +205,27 @@ fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
         let on_map = |c: f32| (0.0..=size as f32).contains(&c);
         markers.retain(|m| on_map(m.x) && on_map(m.z));
     }
+    let placed = match own.get("mapgrouppos.xml") {
+        Some(positions) => loot::positions(&String::from_utf8_lossy(positions)),
+        None => terrain_buildings,
+    };
+    let loot = if placed.is_empty() {
+        None
+    } else {
+        let configs = items::ItemConfigs::read(&source.item_configs);
+        loot::build(&own, base.as_ref(), &placed, &zones, &configs)
+    };
+    if let Some(loot) = &loot {
+        log::info!(
+            "{}: {} items over {} loot buildings{}",
+            source.name,
+            loot.items.len(),
+            loot.buildings.len(),
+            if loot.tiered { ", with tiers" } else { "" }
+        );
+    }
     let pois = poi::Pois {
+        loot,
         places: source
             .places
             .iter()
@@ -221,21 +249,22 @@ fn pois_json(source: &WorldSource) -> Result<Vec<u8>> {
 }
 
 /// The terrain's wells and fresh water, and with `loot` (another map's loot table) its lootable
-/// buildings. A world file that can't be read right now is an error (the caller keeps the
-/// markers it has); one that's corrupt just gives none.
+/// buildings, as markers and as (model, x, z) for the item view. A world file that can't be
+/// read right now is an error (the caller keeps the markers it has); one that's corrupt just
+/// gives none.
 fn terrain_markers(
     source: &WorldSource,
     loot: Option<&HashMap<String, std::collections::HashSet<String>>>,
-) -> Result<Vec<poi::Marker>> {
+) -> Result<(Vec<poi::Marker>, loot::Placed)> {
     let Some(terrain) = &source.terrain else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     let data = match terrain.read() {
         Ok(data) => data,
         Err(e) if pbo::is_io(&e) => return Err(e.context("reading the world file")),
         Err(e) => {
             log::warn!("{}: reading the world file: {e:#}", source.name);
-            return Ok(Vec::new());
+            return Ok(Default::default());
         }
     };
     let wells = water::well_classes(&source.scripts)?;
@@ -249,7 +278,7 @@ fn terrain_markers(
     };
     let Some(objects) = wrp::objects(&data, keep) else {
         log::warn!("{}: couldn't read the world file's objects", source.name);
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     drop(data);
     let mut markers = water::markers(&objects, &wells);
@@ -265,6 +294,7 @@ fn terrain_markers(
             .filter(|m| m.kind == poi::Kind::FreshWater)
             .count()
     );
+    let mut placed = Vec::new();
     if let Some(loot) = loot {
         let buildings = poi::terrain_buildings(&objects, loot);
         log::info!(
@@ -273,8 +303,13 @@ fn terrain_markers(
             buildings.len()
         );
         markers.extend(buildings);
+        placed = objects
+            .buildings()
+            .into_iter()
+            .filter(|(class, x, z)| loot.contains_key(class) && x.is_finite() && z.is_finite())
+            .collect();
     }
-    Ok(markers)
+    Ok((markers, placed))
 }
 
 /// Builds the satellite layer in a new folder, deleted again unless kept.

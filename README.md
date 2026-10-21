@@ -111,7 +111,8 @@ Join a server and press **M**. The first time you join a map it takes a couple o
 running underneath, so the keyboard still goes to DayZ. The map takes the mouse whenever the
 game's cursor is free over it. On Windows, DayZ keeps the mouse while it's the active window (the
 wheel still zooms the map), so click the map to give it the mouse; until you close it or Alt+Tab
-back to the game, keys wait. That click only makes the map active, but DayZ sees it too:
+back to the game, keys wait. That click only makes the map active, but DayZ sees it too. The
+one time the map takes the keyboard is while you type in the Items search box:
 
 | Action | How |
 | --- | --- |
@@ -119,6 +120,7 @@ back to the game, keys wait. That click only makes the map active, but DayZ sees
 | Zoom | scroll wheel, double-click |
 | Reset view | **Fit** |
 | Points of interest | **Layers** |
+| Where items spawn | **Items…** (see [Finding items](#finding-items)) |
 | Your own markers | right-click the map; drag one to move it |
 | Other maps | **Maps…** (the overlay switches back when you join a server) |
 | Close | **M**, the **×** button, or switching away from the game |
@@ -186,7 +188,40 @@ itself are missing, and there are no event spawns or zones (`dayz-map list` says
 loot" for these). On Chernarus this way finds exactly the buildings its own files list. Water comes from the
 terrain itself, so it's complete, except on maps whose world file is encrypted (Sakhal, Nasdara), which
 fall back to the wells listed in the economy files. Points of interest are rebuilt on their own
-(in well under a second) when the importer's version or the map's files change.
+(in a second or two) when the importer's version or the map's files change.
+
+## Finding items
+
+**Items…** lists every item the map's loot can spawn, by kind: Guns, Ammo, Magazines,
+Attachments, Food, Drinks, Medical, Clothing, Backpacks, Vests, Tools and melee, Tents and
+storage, Explosives, Vehicle parts, and Books. Tick a kind, or single items, and the map shows
+the buildings they can spawn in as gold dots, bigger and paler where more of them fit. Hover a
+dot for the building, its tier, which of your picks spawn there, and how many loot spots can hold
+them. Hover an item in the list for the kinds of building and the tiers it spawns in, how many
+buildings that is on this map, and whether it also drops at heli crashes and other events. While
+items are picked, the loot-building layers are hidden. Your picks are kept between sessions and
+maps; **Clear** drops them.
+
+To find one item, click the search box and type part of its name, or of its class name (`akm`
+finds the KA-M). That box borrows the keyboard: while you type, DayZ doesn't get the keys (M is
+just an m there), and Enter, Esc, or a click elsewhere gives them back. An item's colours (a
+backpack's, say) share one line.
+
+An item can spawn in a building when, in the map's economy files:
+
+- the building's usages (from `mapgroupproto.xml`, plus the area's from `areaflags.map`, such as
+  Coast or Hunting) include one of the item's (`types.xml`),
+- the area's tier (`areaflags.map`) is one the item allows,
+- and one of the building's loot containers takes the item's category and tag (shelves, floor,
+  ...).
+
+A list that's missing allows anything, and items with a nominal of 0 don't spawn. Buildings in
+the static contaminated zones also take ContaminatedArea loot. Names and kinds come from the
+game's item configs and string table. These are the map's defaults: many servers change
+`types.xml` (more Mosins, modded items) and their changes can't be seen from outside. The game
+also checks that an item physically fits a spot, which isn't modelled here, so a rifle can show
+on a small shelf. A map without its own economy files uses the base game's items and building
+loot, without tiers.
 
 ## Your markers
 
@@ -298,8 +333,11 @@ loot. Some community servers ban third-party tools in their rules, so check your
   on if it's missing or out of date, and rebuilds maps made by older versions.
 - **Overlay window on Linux** (`src/host/wayland.rs`): a full-screen `wlr-layer-shell` surface on the
   `overlay` layer, which compositors draw above fullscreen windows, placed on the monitor with
-  the game window. It never takes keyboard focus, so the game stays the active window and
-  keeps running; clicks on it don't activate it either. Its namespace is `on-screen-display`,
+  the game window. It doesn't take keyboard focus, so the game stays the active window and
+  keeps running; clicks on it don't activate it either. The exception is the Items search box:
+  while it has focus, the surface asks for the keyboard (exclusive interactivity), and when it
+  lets go it asks the window manager, through XWayland's `_NET_ACTIVE_WINDOW`, to make the game
+  active again (letting go alone leaves KWin's keyboard with nobody). Its namespace is `on-screen-display`,
   which KWin treats like the volume OSD: it fades in and out rather than animating like a window.
   Rendering is egui on wgpu (Vulkan).
 - **Windows** (`src/host/windows.rs`): a topmost, non-activating tool window
@@ -309,8 +347,8 @@ loot. Some community servers ban third-party tools in their rules, so check your
   can hold back), and an active DayZ hides the cursor and keeps it in the middle of the screen,
   so the first click on the map makes the overlay the active window and is otherwise dropped;
   closing the map gives focus back to the game. The hotkey comes from raw keyboard input, which
-  Windows delivers to background windows without a hook, and the overlay hides when another
-  window comes to the front.
+  Windows delivers to background windows without a hook (while you type in the Items search, M
+  is a letter instead), and the overlay hides when another window comes to the front.
 - **Hotkey on Linux** (`src/trigger/`): Proton games draw through XWayland, which only receives keyboard
   input while one of its windows is focused. The app listens for raw XInput2 key events from
   XWayland and checks the focused window against `window_match`: no key grab, no root access, and
@@ -320,7 +358,10 @@ loot. Some community servers ban third-party tools in their rules, so check your
   the pyramid level that matches the zoom. Closing the overlay frees all but the overview tiles.
 - **Importer** (`src/import/`): PBO archives (including LZSS-compressed entries), PAA textures
   (DXT1/5 + LZO), rapified configs, `.wrp` world files (header, classed buildings, and the 60-byte object
-  table, found by its record shape), and the economy files.
+  table, found by its record shape), and the economy files. `areaflags.map` is a header (cells
+  across and down, metres across and down), a 32-bit usage mask per cell, then a tier mask per
+  cell: 8 bits, or 4 (low half first) on maps with at most four tiers, such as Livonia. Rows run
+  south to north, and the bits follow the order of `cfglimitsdefinition.xml`.
 
 ## Not done yet
 

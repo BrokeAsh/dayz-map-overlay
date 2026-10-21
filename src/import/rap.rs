@@ -36,6 +36,8 @@ impl Value {
 
 #[derive(Debug, Clone, Default)]
 pub struct Class {
+    /// The class it extends (`class Mosin9130: Mosin9130_Base`), or empty.
+    pub parent: String,
     pub entries: Vec<(String, Entry)>,
 }
 
@@ -199,9 +201,12 @@ impl Reader<'_> {
         }
         self.enter()?;
         let mut i = offset;
-        let _parent = self.string(&mut i)?;
+        let parent = self.string(&mut i)?;
         let count = self.compressed(&mut i)?;
-        let mut class = Class::default();
+        let mut class = Class {
+            parent,
+            entries: Vec::new(),
+        };
         for _ in 0..count {
             self.spend()?;
             match self.byte(&mut i)? {

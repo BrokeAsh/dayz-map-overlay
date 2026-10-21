@@ -6,6 +6,7 @@
 //! grabbing it (the game still gets it) and without root access to input devices.
 
 use anyhow::{Context, Result, bail};
+use std::sync::atomic::{AtomicU32, Ordering};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
@@ -16,6 +17,10 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::config::Config;
+
+/// The game's X11 window, last seen focused: to give it the keyboard back after typing in the
+/// map (0: none yet).
+static GAME_WINDOW: AtomicU32 = AtomicU32::new(0);
 
 /// XIAllDevices. XWayland reports raw events from the physical (slave) devices only.
 const ALL_DEVICES: u16 = 0;
@@ -81,6 +86,33 @@ pub fn spawn(
                 next = Listener::connect(keysym, &name);
             }
         })?;
+    Ok(())
+}
+
+/// Asks the window manager to make the game the active window again, so it gets the keyboard
+/// back after typing in the map. (Letting go of the keyboard isn't enough: KWin leaves it with
+/// nobody.)
+pub fn focus_game() -> Result<()> {
+    let window = GAME_WINDOW.load(Ordering::Relaxed);
+    if window == 0 {
+        bail!("the game's window isn't known");
+    }
+    let (conn, screen) = RustConnection::connect(None).context("connecting to XWayland")?;
+    let root = conn.setup().roots[screen].root;
+    let active = conn
+        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+        .reply()?
+        .atom;
+    // Source 2: a pager, which window managers obey without focus-stealing checks.
+    let event = xproto::ClientMessageEvent::new(32, window, active, [2, 0, 0, 0, 0]);
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    )?
+    .check()
+    .context("asking for the game to be the active window")?;
     Ok(())
 }
 
@@ -155,7 +187,15 @@ impl Listener {
         let (root, keysym) = (*root, *keysym);
         // Updated when the keyboard layout changes (the hotkey's letter may move).
         let (mut hotkey, mut blocking) = (hotkey.clone(), *blocking);
-        let mut game_focused = matches(&atoms.active_window(conn, root).0);
+        // Whether the focused window is the game, noting which window that is.
+        let game_has_focus = || {
+            let focused = matches(&atoms.active_window(conn, root).0);
+            if focused && let Some(window) = atoms.active_id(conn, root) {
+                GAME_WINDOW.store(window, Ordering::Relaxed);
+            }
+            focused
+        };
+        let mut game_focused = game_has_focus();
         loop {
             let event = match conn.wait_for_event() {
                 Ok(event) => event,
@@ -211,7 +251,7 @@ impl Listener {
                     }
                 }
                 Event::PropertyNotify(e) if e.atom == atoms.active_window => {
-                    let focused = matches(&atoms.active_window(conn, root).0);
+                    let focused = game_has_focus();
                     if game_focused && !focused {
                         on_unfocus();
                     }
@@ -374,6 +414,17 @@ impl Atoms {
             net_wm_name: atom(b"_NET_WM_NAME")?,
             utf8_string: atom(b"UTF8_STRING")?,
         })
+    }
+
+    /// The focused X11 window, if any.
+    fn active_id(&self, conn: &RustConnection, root: Window) -> Option<Window> {
+        conn.get_property(false, root, self.active_window, AtomEnum::WINDOW, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()
+            .filter(|&w| w != 0)
     }
 
     /// Lower-case "<instance> <class> | <title>" of the focused X11 window (or empty), and its

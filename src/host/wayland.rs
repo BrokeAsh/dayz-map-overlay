@@ -1,6 +1,8 @@
 //! Shows the overlay as a full-screen layer-shell surface on the `overlay` layer, which the
-//! compositor draws above everything, fullscreen games included. It never takes keyboard focus,
-//! so the game stays active underneath; the hotkey comes from XWayland (`crate::trigger`).
+//! compositor draws above everything, fullscreen games included. It doesn't take keyboard focus,
+//! so the game stays active underneath; the hotkey comes from XWayland (`crate::trigger`). The
+//! one exception is a text box (the Items search): while one has focus, the overlay borrows
+//! the keyboard, and gives it back on Enter, Esc, or a click elsewhere.
 
 use anyhow::{Context, Result};
 use egui_wgpu::wgpu;
@@ -134,6 +136,8 @@ pub fn run(config: Config, show: bool) -> Result<()> {
         modifiers: egui::Modifiers::NONE,
         pointer_pos: None,
         keyboard_focus: false,
+        keyboard_borrowed: false,
+        keyboard_returned: Instant::now(),
         start: Instant::now(),
         needs_redraw: false,
         next_repaint: None,
@@ -214,6 +218,9 @@ struct Host {
     modifiers: egui::Modifiers,
     pointer_pos: Option<egui::Pos2>,
     keyboard_focus: bool,
+    /// The overlay has the keyboard for typing, and since when it gave it back.
+    keyboard_borrowed: bool,
+    keyboard_returned: Instant,
     start: Instant,
     needs_redraw: bool,
     next_repaint: Option<Instant>,
@@ -253,6 +260,10 @@ impl Host {
                 } else if self.last_hide.elapsed() >= REOPEN_GRACE {
                     self.show();
                 }
+            }
+            // Typing in the map takes the keyboard from the game, which isn't switching away.
+            HostEvent::GameUnfocused if self.typing() => {
+                log::info!("game unfocused while typing in the map");
             }
             // The map belongs to the game; don't leave it over whatever the user switched to.
             HostEvent::GameUnfocused => self.hide(),
@@ -350,6 +361,13 @@ impl Host {
         self.events = super::release_pointer();
         self.pointer_pos = None;
         self.keyboard_focus = false;
+        // Not still typing when it opens again.
+        self.egui_ctx.memory_mut(|m| m.stop_text_input());
+        if self.keyboard_borrowed {
+            self.keyboard_borrowed = false;
+            self.keyboard_returned = Instant::now();
+            give_keyboard_back();
+        }
         self.last_hide = Instant::now();
         self.app.on_hide();
         self.gpu.release_textures(&self.egui_ctx);
@@ -438,6 +456,28 @@ impl Host {
         let app = &mut self.app;
         let output = self.egui_ctx.run_ui(raw, |ui| app.ui(ui));
 
+        // Borrow the keyboard while a text box has focus; the compositor gives it back to the
+        // game when we let go.
+        let typing = self.egui_ctx.text_edit_focused();
+        if typing != self.keyboard_borrowed {
+            self.keyboard_borrowed = typing;
+            if !typing {
+                self.keyboard_returned = Instant::now();
+            }
+            overlay.layer.set_keyboard_interactivity(if typing {
+                KeyboardInteractivity::Exclusive
+            } else {
+                KeyboardInteractivity::None
+            });
+            log::info!(
+                "{} the keyboard",
+                if typing { "borrowing" } else { "returning" }
+            );
+            if !typing {
+                give_keyboard_back();
+            }
+        }
+
         match repaint_after(&output) {
             Some(None) => self.needs_redraw = true,
             Some(Some(at)) => {
@@ -478,6 +518,12 @@ impl Host {
         }
     }
 
+    /// Whether the keyboard is ours for typing, or was a moment ago: the game's focus comes back
+    /// a little after we return it.
+    fn typing(&self) -> bool {
+        self.keyboard_borrowed || self.keyboard_returned.elapsed() < Duration::from_secs(1)
+    }
+
     fn push_event(&mut self, event: egui::Event) {
         self.events.push(event);
         self.needs_redraw = true;
@@ -487,6 +533,13 @@ impl Host {
         self.overlay
             .as_ref()
             .is_some_and(|o| o.layer.wl_surface() == surface)
+    }
+}
+
+/// Makes the game the active window again after typing in the map.
+fn give_keyboard_back() {
+    if let Err(e) = crate::trigger::focus_game() {
+        log::warn!("giving the game its keyboard back: {e:#}");
     }
 }
 

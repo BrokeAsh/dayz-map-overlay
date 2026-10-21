@@ -161,6 +161,9 @@ pub struct Pois {
     pub places: Vec<Place>,
     pub markers: Vec<Marker>,
     pub zones: Vec<Zone>,
+    /// Where each item can spawn; maps without economy files and older imports have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loot: Option<super::loot::Loot>,
 }
 
 /// Place names from a world's config class.
@@ -287,6 +290,11 @@ pub fn terrain_buildings(
             })
         })
         .collect()
+}
+
+/// A building model's name for people: `land_house_1w03` -> `House 1w03`.
+pub fn building_name(model: &str) -> String {
+    title(&pretty(model))
 }
 
 /// Capitalises each word, for names that only come in lower case.
@@ -556,27 +564,33 @@ fn pretty(name: &str) -> String {
     out.trim().to_string()
 }
 
-fn attr<'a>(attrs: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
+pub(super) fn attr<'a>(attrs: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
     attrs
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(key))
         .map(|(_, v)| *v)
 }
 
-enum Tag<'a> {
+pub(super) enum Tag<'a> {
     Open(&'a str, Vec<(&'a str, &'a str)>),
     Close(&'a str),
 }
 
 /// A forgiving XML tag scanner: mod-made economy files are often not strictly valid XML.
-struct Tags<'a> {
+pub(super) struct Tags<'a> {
     text: &'a str,
     pos: usize,
 }
 
 impl<'a> Tags<'a> {
-    fn new(text: &'a str) -> Self {
+    pub(super) fn new(text: &'a str) -> Self {
         Self { text, pos: 0 }
+    }
+
+    /// The text between the last tag and the next one (`45` after `<nominal>`).
+    pub(super) fn text(&self) -> &'a str {
+        let rest = &self.text[self.pos..];
+        rest[..rest.find('<').unwrap_or(rest.len())].trim()
     }
 }
 

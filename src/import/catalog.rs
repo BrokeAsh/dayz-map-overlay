@@ -22,13 +22,16 @@ use crate::maps;
 /// Bumped when the importer's output changes, so older imports are rebuilt automatically.
 pub const IMPORT_VERSION: u32 = 3;
 /// Bumped when only the points of interest change; those are rebuilt without the tiles.
-pub const POI_VERSION: u32 = 6;
+pub const POI_VERSION: u32 = 7;
 
-const ECONOMY_FILES: [&str; 4] = [
+const ECONOMY_FILES: [&str; 7] = [
     "mapgrouppos.xml",
     "mapgroupproto.xml",
     "cfgeventspawns.xml",
     "cfgeffectarea.json",
+    "types.xml",
+    "areaflags.map",
+    "cfglimitsdefinition.xml",
 ];
 
 #[derive(Debug, Clone)]
@@ -50,9 +53,24 @@ impl EconomySource {
     /// Every file that reads. A corrupt one is skipped, but a failing read (a file another
     /// program has locked, say) fails the whole thing, so the caller keeps what it had.
     pub fn read_all(&self) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+        self.read_some(|_| true)
+    }
+
+    /// Like `read_all`, for the files `wanted` names.
+    pub fn read_some(
+        &self,
+        wanted: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<HashMap<String, Vec<u8>>> {
         let mut files = HashMap::new();
-        for (name, &i) in &self.files {
-            match self.pbo.read(&self.pbo.entries[i]) {
+        for (name, &i) in self.files.iter().filter(|(name, _)| wanted(name)) {
+            let entry = &self.pbo.entries[i];
+            // The tier map is a fixed 5 bytes per cell: 80 MB for a 4096-cell grid.
+            let read = if name == "areaflags.map" {
+                self.pbo.read_large(entry)
+            } else {
+                self.pbo.read(entry)
+            };
+            match read {
                 Ok(data) => {
                     files.insert(name.clone(), data);
                 }
@@ -99,6 +117,10 @@ pub struct WorldSource {
     pub config: Option<Arc<Pbo>>,
     /// Archives with scripts that can define drinkable classes: the game's and the map mod's.
     pub scripts: Vec<Arc<Pbo>>,
+    /// The base game's economy, for the item list and building loot a map doesn't ship.
+    pub base_economy: Option<EconomySource>,
+    /// Archives with item configs or string tables: the game's and the map mod's.
+    pub item_configs: Vec<Arc<Pbo>>,
 }
 
 impl WorldSource {
@@ -127,9 +149,20 @@ impl WorldSource {
             .chain(self.terrain.iter().map(|t| &t.pbo))
             .chain(&self.config)
             .chain(&self.scripts)
+            .chain(self.base_economy.iter().map(|e| &e.pbo))
         {
             parts.push(pbo.path.display().to_string());
             parts.push(pbo.opened.clone());
+        }
+        // A hundred-odd archives: their stamps, folded into one number.
+        if !self.item_configs.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::hash::DefaultHasher::new();
+            for pbo in &self.item_configs {
+                pbo.path.hash(&mut hasher);
+                pbo.opened.hash(&mut hasher);
+            }
+            parts.push(format!("items:{:x}", hasher.finish()));
         }
         parts.join("|")
     }
@@ -157,6 +190,8 @@ impl WorldSource {
             .chain(self.terrain.iter().map(|t| &t.pbo))
             .chain(&self.config)
             .chain(&self.scripts)
+            .chain(self.base_economy.iter().map(|e| &e.pbo))
+            .chain(&self.item_configs)
             .any(|pbo| pbo.changed())
     }
 
@@ -269,7 +304,19 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
     let mut tiles = Vec::new();
     let mut economies = Vec::new();
     let mut scripts: HashMap<Option<String>, Vec<Arc<Pbo>>> = HashMap::new();
+    let mut item_configs: HashMap<Option<String>, Vec<Arc<Pbo>>> = HashMap::new();
     for archive in &archives {
+        let has_items = archive.pbo.entries.iter().any(|e| {
+            let lower = e.name.to_ascii_lowercase();
+            let file = lower.rsplit('\\').next().unwrap_or(&lower);
+            file == "config.bin" || file == "stringtable.csv"
+        });
+        if has_items {
+            item_configs
+                .entry(archive.mod_id.clone())
+                .or_default()
+                .push(archive.pbo.clone());
+        }
         let has_scripts = archive
             .pbo
             .entries
@@ -332,9 +379,12 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             log::warn!("skipping a world with an unusable name: {:?}", def.class);
             continue;
         }
+        let world_base = base_economy(&economy, &base_loot);
         let mut world_scripts = scripts.get(&None).cloned().unwrap_or_default();
+        let mut world_items = item_configs.get(&None).cloned().unwrap_or_default();
         if def.mod_id.is_some() {
             world_scripts.extend(scripts.get(&def.mod_id).into_iter().flatten().cloned());
+            world_items.extend(item_configs.get(&def.mod_id).into_iter().flatten().cloned());
         }
         worlds.push(WorldSource {
             name: display_name(&id, def.description.as_deref()),
@@ -349,6 +399,8 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             terrain: Some(def.terrain.clone()),
             config: (!Arc::ptr_eq(&def.config, &def.terrain.pbo)).then(|| def.config.clone()),
             scripts: world_scripts,
+            base_economy: world_base,
+            item_configs: world_items,
         });
     }
     // Tiles with no readable world config (Sakhal's and Nasdara's world files are encrypted):
@@ -367,6 +419,8 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             continue;
         }
         let anchor = source.pbo.prefix.to_lowercase();
+        let economy = best_economy(&economies, &archive.mod_id, &anchor);
+        let world_base = base_economy(&economy, &base_loot);
         let places = match archive.mod_id {
             None => poi::builtin_places(&id),
             Some(_) => Vec::new(),
@@ -379,12 +433,14 @@ pub fn scan(roots: &[(PathBuf, bool)]) -> Catalog {
             world_size: None,
             places,
             satellite: source.clone(),
-            economy: best_economy(&economies, &archive.mod_id, &anchor),
+            economy,
             // Without a readable terrain there are no buildings to look up.
             base_loot: None,
             terrain: None,
             config: None,
             scripts: Vec::new(),
+            base_economy: world_base,
+            item_configs: item_configs.get(&None).cloned().unwrap_or_default(),
         });
     }
     worlds.sort_by_key(|a| a.name.to_lowercase());
@@ -404,6 +460,17 @@ fn link_score(
     let same_mod = same_origin && mod_id.is_some();
     (same_mod || shared >= 3)
         .then_some(usize::from(same_mod) * 100 + usize::from(same_origin) * 50 + shared)
+}
+
+/// The base game's economy, when a map's own lacks the item list or the building loot.
+fn base_economy(
+    own: &Option<EconomySource>,
+    base: &Option<EconomySource>,
+) -> Option<EconomySource> {
+    let complete = own.as_ref().is_some_and(|e| {
+        e.files.contains_key("types.xml") && e.files.contains_key("mapgroupproto.xml")
+    });
+    (!complete).then(|| base.clone()).flatten()
 }
 
 fn best_economy(
@@ -759,6 +826,7 @@ mod tests {
 
     fn class(entries: Vec<(&str, Entry)>) -> Entry {
         Entry::Class(Class {
+            parent: String::new(),
             entries: entries
                 .into_iter()
                 .map(|(n, e)| (n.to_string(), e))

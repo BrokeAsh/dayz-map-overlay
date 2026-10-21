@@ -40,6 +40,8 @@ pub struct ViewConfig {
     pub show_map_markers: bool,
     /// New markers are saved for the whole map rather than the server (the switch when adding).
     pub markers_for_map: bool,
+    /// Items picked in the Items panel (lower-case class names), whose spawns the map shows.
+    pub items: std::collections::BTreeSet<String>,
 }
 
 impl Default for Config {
@@ -73,6 +75,7 @@ impl Default for ViewConfig {
             show_server_markers: true,
             show_map_markers: true,
             markers_for_map: false,
+            items: Default::default(),
         }
     }
 }

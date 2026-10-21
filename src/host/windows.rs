@@ -343,6 +343,8 @@ impl Host {
         self.visible = false;
         self.took_focus = false;
         self.return_to = None;
+        // Not still typing when it opens again.
+        self.egui_ctx.memory_mut(|m| m.stop_text_input());
         self.last_hide = Instant::now();
         self.app.on_hide();
         self.gpu.release_textures(&self.egui_ctx);
@@ -394,6 +396,10 @@ impl Host {
             return;
         };
         if front.ours {
+            // Typed into the map's search box: a letter, not the hotkey.
+            if self.egui_ctx.text_edit_focused() {
+                return;
+            }
             // The map was clicked (or a dialog of ours is in front).
             self.hide();
             return;

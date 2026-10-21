@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Find where items spawn: **Items…** lists everything the map's loot can spawn, by kind (guns,
+  ammo, food, drinks, medical, clothing, backpacks, ...). Tick a kind or single items and the map
+  shows the buildings they can spawn in, bigger where more fit; hover one for its tier and which
+  of your picks spawn there. A search box finds items by name, and borrows the keyboard only while
+  you type in it: Enter or Esc gives the keys back to DayZ. Worked out from each map's economy
+  files and tier map; servers can change their loot.
+- Maps you already have get the loot data on their own, in the background, when the overlay
+  starts.
+
 ## 0.3.2
 
 - Place names on Sakhal (60) and Nasdara (156). Their world files are encrypted, so the overlay
