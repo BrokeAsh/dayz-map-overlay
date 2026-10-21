@@ -2,7 +2,7 @@
 
 pkgname=dayz-map-overlay-bin
 _name=dayz-map
-pkgver=0.3.2
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="See-through DayZ map that opens over the game and follows the server you're on"
 arch=('x86_64')
@@ -14,7 +14,7 @@ provides=('dayz-map-overlay')
 conflicts=('dayz-map-overlay')
 options=('!strip' '!debug')
 source=("$url/releases/download/v$pkgver/$_name-v$pkgver-linux-x86_64.tar.gz")
-sha256sums=('87a2e873c888b2a29dc9e8f75cb34157ba0638e7ea6ccec303b56095f828acc5')
+sha256sums=('ea6a59044489895e77f50dc5d0a1e955e90e154481056ba997d9a72b075008c8')
 
 package() {
   cd "$_name-v$pkgver-linux-x86_64"
